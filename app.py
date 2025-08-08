@@ -5,15 +5,6 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import KMeans
 import plotly.express as px
 import io
-import locale
-
-# 한국어 요일 설정을 위해 로케일 설정
-try:
-    locale.setlocale(locale.LC_TIME, 'ko_KR.UTF-8')
-except locale.Error:
-    if 'locale_warning_shown' not in st.session_state:
-        st.warning("한국어 로케일(ko_KR.UTF-8)을 설정할 수 없습니다. 요일이 영어로 표시될 수 있습니다.")
-        st.session_state.locale_warning_shown = True
 
 # ----------------------------------------------------------------------
 # 데이터 처리 및 분석 함수
@@ -21,22 +12,26 @@ except locale.Error:
 
 
 @st.cache_data
-def load_and_process_data(uploaded_file, k, lambda_param, w_amount, w_freq, w_recency):
+def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_freq, w_recency):
     """
-    파일 로드부터 클러스터링, 가중치 기반 등급 부여까지 모든 데이터 처리를 수행합니다.
+    파일 내용을 입력받아 데이터 처리 및 분석을 수행합니다.
+    Streamlit의 파일 업로더 객체 대신 파일의 바이트(bytes) 내용을 직접 다룹니다.
     """
     try:
-        uploaded_file.seek(0)
-        if uploaded_file.name.endswith('.csv'):
-            df_raw = pd.read_csv(uploaded_file, low_memory=False)
+        # 파일 내용을 메모리에서 직접 읽기
+        file_extension = st.session_state.file_name.split('.')[-1]
+        if file_extension == 'csv':
+            df_raw = pd.read_csv(io.BytesIO(
+                uploaded_file_contents), low_memory=False)
         else:
-            df_raw = pd.read_excel(uploaded_file)
+            df_raw = pd.read_excel(io.BytesIO(uploaded_file_contents))
 
         if df_raw.empty:
             return None, "오류: 업로드된 파일에 분석할 데이터가 없습니다."
     except Exception as e:
         return None, f"파일을 읽는 중 오류가 발생했습니다: {e}"
 
+    # --- 데이터 처리 로직 (이전과 동일) ---
     date_col = next((col for col in df_raw.columns if '날짜' in col), '날짜')
     book_col = next((col for col in df_raw.columns if '도서명' in col), '도서명')
     amount_col = next((col for col in df_raw.columns if '발주량' in col), '발주량')
@@ -47,7 +42,11 @@ def load_and_process_data(uploaded_file, k, lambda_param, w_amount, w_freq, w_re
     df_raw[date_col] = pd.to_datetime(df_raw[date_col], errors='coerce')
     df_raw.dropna(subset=[date_col, book_col, amount_col], inplace=True)
 
-    df_raw['날짜_포맷'] = df_raw[date_col].dt.strftime('%m월 %d일 (%a)')
+    # 안정적인 요일 변환 (한국어)
+    weekday_map = {"Monday": "월", "Tuesday": "화", "Wednesday": "수",
+                   "Thursday": "목", "Friday": "금", "Saturday": "토", "Sunday": "일"}
+    df_raw['날짜_포맷'] = df_raw[date_col].dt.strftime(
+        '%m월 %d일') + " (" + df_raw[date_col].dt.day_name().map(weekday_map) + ")"
 
     agg_df = df_raw.groupby(book_col).agg(
         총발주량=(amount_col, 'sum'),
@@ -115,13 +114,41 @@ def to_excel(df):
 st.set_page_config(layout="wide", page_title="도서 발주 데이터 분석 대시보드")
 st.title("📚 도서 발주 데이터 분석 대시보드")
 
+# --- 세션 상태 초기화 ---
+if 'analysis_done' not in st.session_state:
+    st.session_state.analysis_done = False
+
+# --- 사이드바 UI ---
 with st.sidebar:
     st.header("⚙️ 1. 분석 파일 업로드")
     uploaded_file = st.file_uploader(
         "CSV 또는 XLSX 발주서 파일을 업로드하세요.", type=["csv", "xlsx"])
 
+    # 파일이 업로드 되면 나머지 UI 표시
     if uploaded_file:
-        time_span_days = get_date_range(uploaded_file)
+        # 파일이 변경되면 분석 상태 초기화
+        if 'file_name' not in st.session_state or st.session_state.file_name != uploaded_file.name:
+            st.session_state.analysis_done = False
+            st.session_state.file_name = uploaded_file.name
+            st.session_state.file_contents = uploaded_file.getvalue()
+
+        # 데이터 기간 계산
+        try:
+            date_col_name = '날짜'
+            if st.session_state.file_name.endswith('.csv'):
+                df_preview = pd.read_csv(io.BytesIO(
+                    st.session_state.file_contents), low_memory=False, usecols=[date_col_name])
+            else:
+                df_preview = pd.read_excel(io.BytesIO(
+                    st.session_state.file_contents), usecols=[date_col_name])
+            df_preview[date_col_name] = pd.to_datetime(
+                df_preview[date_col_name], errors='coerce').dropna()
+            time_span_days = (df_preview[date_col_name].max(
+            ) - df_preview[date_col_name].min()).days
+        except Exception:
+            time_span_days = 365  # 미리보기에 실패하면 기본값
+
+        # 기간에 따른 기본값 설정
         if time_span_days <= 7:
             k_default, lambda_default, period_text = 7.0, 0.5, "1주일 이내 (매우 민감)"
         elif time_span_days <= 31:
@@ -144,36 +171,35 @@ with st.sidebar:
         w_freq = st.slider("발주횟수 중요도", 1, 5, 4)
         w_recency = st.slider("시간가중치 중요도", 1, 5, 2)
 
-        run_button = st.button("🚀 분석 실행", type="primary",
-                               use_container_width=True)
+        # --- 분석 실행 버튼 ---
+        if st.button("🚀 분석 실행", type="primary", use_container_width=True):
+            with st.spinner('데이터를 분석 중입니다. 잠시만 기다려주세요...'):
+                agg_df, df_raw_or_error = load_and_process_data(
+                    st.session_state.file_contents, k_param, lambda_param, w_amount, w_freq, w_recency)
+                if agg_df is not None:
+                    st.session_state.analysis_done = True
+                    st.session_state.agg_df = agg_df
+                    st.session_state.df_raw = df_raw_or_error
+                else:
+                    st.session_state.analysis_done = False
+                    # df_raw_or_error 변수에 담긴 에러 메시지 출력
+                    st.error(df_raw_or_error)
 
-if 'run_button' not in st.session_state:
-    st.session_state.run_button = False
-
+# --- 메인 화면 UI ---
 if not uploaded_file:
     st.info("👈 사이드바에서 분석할 파일을 업로드해주세요.")
-elif run_button:
-    with st.spinner('데이터를 분석 중입니다. 잠시만 기다려주세요...'):
-        agg_df, df_raw_or_error = load_and_process_data(
-            uploaded_file, k_param, lambda_param, w_amount, w_freq, w_recency)
-        if agg_df is not None:
-            st.session_state.run_button = True
-            st.session_state.agg_df = agg_df
-            st.session_state.df_raw = df_raw_or_error
-            st.rerun()
-        else:
-            st.error(df_raw_or_error)
-            st.session_state.run_button = False
-elif st.session_state.run_button:
+elif st.session_state.analysis_done:
+    # 분석이 완료된 상태일 때만 화면을 그림
     agg_df = st.session_state.agg_df
     df_raw = st.session_state.df_raw
 
-    st.success(f"✅ **{uploaded_file.name}** 파일 분석이 완료되었습니다.")
+    st.success(f"✅ **{st.session_state.file_name}** 파일 분석이 완료되었습니다.")
 
     tab1, tab2, tab3, tab4 = st.tabs(
         ["[ 📈 등급 요약 ]", "[ 🌟 유망 도서 발굴 ]", "[ 📊 데이터 인사이트 ]", "[ 📋 전체 데이터 ]"])
 
     with tab1:
+        # 등급 요약 탭 내용...
         st.header("등급별 요약")
         col1, col2 = st.columns(2)
         with col1:
@@ -197,14 +223,15 @@ elif st.session_state.run_button:
             | **5등급** | 사실상 발주가 없는 **비활성/관리 그룹** | **재고 처분 고려 (이벤트, 할인)**, 사실상 단종 검토 |
             """)
     with tab2:
+        # 유망 도서 발굴 탭 내용...
         st.header("🌟 신규 유망 도서 발굴")
-        st.info("아래 조건을 조절하여 '새롭고, 꾸준한' 유망 도서를 직접 찾아보세요.")
+        book_col_name = next(
+            (col for col in df_raw.columns if '도서명' in col), '도서명')
 
         col1, col2 = st.columns(2)
         with col1:
-            max_days_since_first = int(agg_df['최초발주후경과일'].max())
-            days_since_first_limit = st.slider(
-                "출시 기간 필터 (일)", 0, max_days_since_first, min(180, max_days_since_first))
+            days_since_first_limit = st.slider("출시 기간 필터 (일)", 0, int(
+                agg_df['최초발주후경과일'].max()), min(180, int(agg_df['최초발주후경과일'].max())))
         with col2:
             min_freq_limit = st.slider(
                 "최소 발주 횟수 필터", 1, int(agg_df['발주횟수'].max()), 3)
@@ -228,8 +255,6 @@ elif st.session_state.run_button:
 
         st.subheader(f"필터링 결과: 총 {len(promising_books_df)}권의 유망 도서를 찾았습니다.")
 
-        book_col_name = next(
-            (col for col in df_raw.columns if '도서명' in col), '도서명')
         book_list = ["- 도서 선택 -"] + promising_books_df[book_col_name].tolist()
         selected_book = st.selectbox("추이 그래프를 볼 도서를 선택하세요:", book_list)
 
@@ -242,69 +267,49 @@ elif st.session_state.run_button:
 
             fig = px.line(daily_history, x='날짜_포맷', y='발주량',
                           title=f"'{selected_book}' 일별 발주량 추이", markers=True)
-            fig.update_layout(yaxis_title="발주량", xaxis_title="날짜")
             st.plotly_chart(fig, use_container_width=True)
 
     with tab3:
+        # 데이터 인사이트 탭 내용...
         st.header("데이터 인사이트 시각화")
         date_col = next((col for col in df_raw.columns if '날짜' in col), '날짜')
         amount_col = next(
             (col for col in df_raw.columns if '발주량' in col), '발주량')
 
-        # --- 시각화 탭 구조 수정 ---
-        viz_tab1, viz_tab2, viz_tab3, viz_tab4 = st.tabs(
-            ["전체 발주 현황", "월별 발주 현황", "주별 발주 현황", "일별 발주 현황"])
+        viz_tab1, viz_tab2, viz_tab3 = st.tabs(
+            ["월별 발주 현황", "주별 발주 현황", "일별 발주 현황"])
 
         with viz_tab1:
-            st.subheader("주요 트렌드 요약")
-            col1, col2 = st.columns(2)
-            with col1:
-                monthly_orders = df_raw.groupby(pd.Grouper(key=date_col, freq='ME')).agg(
-                    합계=(amount_col, 'sum')).reset_index()
-                monthly_orders['날짜_포맷'] = monthly_orders[date_col].dt.strftime(
-                    '%Y년 %m월')
-                fig_month = px.line(monthly_orders, x='날짜_포맷',
-                                    y='합계', title="월별 총 발주량", markers=True)
-                st.plotly_chart(fig_month, use_container_width=True)
-            with col2:
-                weekly_orders = df_raw.groupby(pd.Grouper(
-                    key=date_col, freq='W-MON')).agg(합계=(amount_col, 'sum')).reset_index()
-                weekly_orders['날짜_포맷'] = weekly_orders[date_col].dt.strftime(
-                    '%m월 %d일')
-                fig_week = px.line(weekly_orders, x='날짜_포맷',
-                                   y='합계', title="주별 총 발주량", markers=True)
-                st.plotly_chart(fig_week, use_container_width=True)
-
-        with viz_tab2:
-            st.subheader("월별 총 발주량 상세")
+            st.subheader("월별 총 발주량")
             monthly_orders = df_raw.groupby(pd.Grouper(key=date_col, freq='ME')).agg(
                 합계=(amount_col, 'sum')).reset_index()
             monthly_orders['날짜_포맷'] = monthly_orders[date_col].dt.strftime(
                 '%Y년 %m월')
-            fig_month_detail = px.bar(
-                monthly_orders, x='날짜_포맷', y='합계', title="월별 총 발주량 (상세)", text_auto=True)
-            st.plotly_chart(fig_month_detail, use_container_width=True)
+            fig_month = px.line(monthly_orders, x='날짜_포맷',
+                                y='합계', title="월별 총 발주량", markers=True)
+            st.plotly_chart(fig_month, use_container_width=True)
 
-        with viz_tab3:
-            st.subheader("주별 총 발주량 상세")
+        with viz_tab2:
+            st.subheader("주별 총 발주량")
             weekly_orders = df_raw.groupby(pd.Grouper(
                 key=date_col, freq='W-MON')).agg(합계=(amount_col, 'sum')).reset_index()
             weekly_orders['날짜_포맷'] = weekly_orders[date_col].dt.strftime(
-                '%Y-%m-%d')
-            fig_week_detail = px.bar(
-                weekly_orders, x='날짜_포맷', y='합계', title="주별 총 발주량 (상세)", text_auto='.2s')
-            st.plotly_chart(fig_week_detail, use_container_width=True)
+                '%Y년 %m월 %d일')
+            fig_week = px.line(weekly_orders, x='날짜_포맷',
+                               y='합계', title="주별 총 발주량", markers=True)
+            st.plotly_chart(fig_week, use_container_width=True)
 
-        with viz_tab4:
-            st.subheader("일별 총 발주량 상세")
+        with viz_tab3:
+            st.subheader("일별 총 발주량")
             daily_orders = df_raw.groupby('날짜_포맷').agg(합계=(amount_col, 'sum'), 날짜=(
                 date_col, 'min')).reset_index().sort_values(by='날짜')
-            fig_day_detail = px.line(
-                daily_orders, x='날짜_포맷', y='합계', title="일별 총 발주량")
-            fig_day_detail.update_traces(mode="lines+markers")
-            st.plotly_chart(fig_day_detail, use_container_width=True)
+            fig_day = px.line(daily_orders, x='날짜_포맷',
+                              y='합계', title="일별 총 발주량")
+            fig_day.update_traces(mode="lines+markers")
+            st.plotly_chart(fig_day, use_container_width=True)
 
     with tab4:
+        # 전체 데이터 탭 내용...
         st.header("전체 분석 데이터")
         display_columns = ['도서명', '등급', '점수', '총발주량', '발주횟수',
                            '시간가중치', '평균 발주 간격', '최초발주일', '최근발주일', '경과일']
@@ -323,4 +328,5 @@ elif st.session_state.run_button:
             st.download_button("💾 XLSX 파일로 다운로드", data=excel_data, file_name='book_cluster_analysis.xlsx',
                                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
 else:
+    # 분석 실행 전 초기 화면
     st.info("사이드바에서 파일을 업로드하고 설정을 마친 후 '분석 실행' 버튼을 눌러주세요.")
