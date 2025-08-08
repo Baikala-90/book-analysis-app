@@ -5,15 +5,6 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import KMeans
 import plotly.express as px
 import io
-import locale
-
-# 한국어 요일 설정을 위해 로케일 설정
-try:
-    locale.setlocale(locale.LC_TIME, 'ko_KR.UTF-8')
-except locale.Error:
-    if 'locale_warning_shown' not in st.session_state:
-        st.warning("한국어 로케일(ko_KR.UTF-8)을 설정할 수 없습니다. 요일이 영어로 표시될 수 있습니다.")
-        st.session_state.locale_warning_shown = True
 
 # ----------------------------------------------------------------------
 # 데이터 처리 및 분석 함수
@@ -50,8 +41,8 @@ def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_f
 
     weekday_map = {"Monday": "월", "Tuesday": "화", "Wednesday": "수",
                    "Thursday": "목", "Friday": "금", "Saturday": "토", "Sunday": "일"}
-    df_raw['날짜_포맷'] = df_raw[date_col].dt.strftime(
-        '%m월 %d일') + " (" + df_raw[date_col].dt.day_name().map(weekday_map) + ")"
+    df_raw['날짜_라벨'] = df_raw[date_col].dt.strftime(
+        '%m월 %d일') + " (" + df_raw[date_col].dt.day_name().map(weekday_map).fillna('') + ")"
 
     agg_df = df_raw.groupby(book_col).agg(
         총발주량=(amount_col, 'sum'),
@@ -135,12 +126,15 @@ with st.sidebar:
 
         try:
             date_col_name = '날짜'
+            # 메모리에서 파일 읽기
+            file_contents_for_preview = io.BytesIO(
+                st.session_state.file_contents)
             if st.session_state.file_name.endswith('.csv'):
-                df_preview = pd.read_csv(io.BytesIO(
-                    st.session_state.file_contents), low_memory=False, usecols=[date_col_name])
+                df_preview = pd.read_csv(
+                    file_contents_for_preview, low_memory=False, usecols=[date_col_name])
             else:
-                df_preview = pd.read_excel(io.BytesIO(
-                    st.session_state.file_contents), usecols=[date_col_name])
+                df_preview = pd.read_excel(
+                    file_contents_for_preview, usecols=[date_col_name])
             df_preview[date_col_name] = pd.to_datetime(
                 df_preview[date_col_name], errors='coerce').dropna()
             time_span_days = (df_preview[date_col_name].max(
@@ -220,7 +214,8 @@ elif st.session_state.analysis_done:
 
     with tab2:
         st.header("🌟 신규 유망 도서 발굴")
-        st.info("아래 조건을 조절하여 '새롭고, 꾸준한' 유망 도서를 직접 찾아보세요.")
+        book_col_name = next(
+            (col for col in df_raw.columns if '도서명' in col), '도서명')
 
         col1, col2 = st.columns(2)
         with col1:
@@ -249,48 +244,38 @@ elif st.session_state.analysis_done:
 
         st.subheader(f"필터링 결과: 총 {len(promising_books_df)}권의 유망 도서를 찾았습니다.")
 
-        # --- 정렬 기능 추가 ---
         col_sort1, col_sort2 = st.columns(2)
         with col_sort1:
-            sort_by_options = {
-                "평균 발주 간격": "평균 발주 간격",
-                "등급 점수": "점수",
-                "총발주량": "총발주량",
-                "발주 횟수": "발주횟수",
-                "출시일": "최초발주후경과일"
-            }
+            sort_by_options = {"평균 발주 간격": "평균 발주 간격", "등급 점수": "점수",
+                               "총발주량": "총발주량", "발주 횟수": "발주횟수", "출시일": "최초발주후경과일"}
             sort_by = st.selectbox(
                 "정렬 기준 선택", options=list(sort_by_options.keys()))
         with col_sort2:
             sort_order = st.selectbox("정렬 순서 선택", options=["오름차순", "내림차순"])
 
-        is_ascending = (sort_order == "오름차순")
         promising_books_df = promising_books_df.sort_values(
-            by=sort_by_options[sort_by], ascending=is_ascending)
-
-        book_col_name = next(
-            (col for col in df_raw.columns if '도서명' in col), '도서명')
+            by=sort_by_options[sort_by], ascending=(sort_order == "오름차순"))
 
         for _, row in promising_books_df.iterrows():
             book_title = row[book_col_name]
             with st.expander(f"'{book_title}' (점수: {row['점수']} / 평균 {row['평균 발주 간격']:.1f}일 간격 / 총 {row['발주횟수']}회, {row['총발주량']}권)"):
+                # --- 오류 수정 로직 ---
                 history_df = df_raw[df_raw[book_col_name] == book_title].copy()
-                daily_history = history_df.groupby('날짜_포맷').agg(
-                    발주량=(next(col for col in df_raw.columns if '발주량' in col), 'sum'),
-                    날짜=(next(col for col in df_raw.columns if '날짜' in col), 'min')
-                ).reset_index().sort_values(by='날짜')
+                # 그룹화할 때 실제 날짜 컬럼을 사용
+                daily_history = history_df.groupby(next(col for col in history_df.columns if '날짜' in col)).agg(
+                    일일_발주량=(
+                        next(col for col in history_df.columns if '발주량' in col), 'sum')
+                ).reset_index()
+                # 그래프에 사용할 라벨 컬럼을 새로 생성
+                daily_history['날짜_라벨'] = daily_history[next(
+                    col for col in daily_history.columns if '날짜' in col)].dt.strftime('%m월 %d일 (%a)')
 
-                # --- 그래프 라벨 수정 ---
-                daily_history.rename(
-                    columns={'날짜_포맷': '날짜', '발주량': '일일 발주량'}, inplace=True)
-                fig = px.line(daily_history, x='날짜', y='일일 발주량',
+                fig = px.line(daily_history, x='날짜_라벨', y='일일_발주량',
                               title=f"'{book_title}' 발주량 추이", markers=True)
-                fig.update_layout(yaxis_title="발주량",
-                                  xaxis_title=None)  # X축 이름 제거
+                fig.update_layout(yaxis_title="발주량", xaxis_title="날짜")
                 st.plotly_chart(fig, use_container_width=True)
 
     with tab3:
-        # ... (이전 코드와 동일, 탭 구조만 유지)
         st.header("데이터 인사이트 시각화")
         date_col = next((col for col in df_raw.columns if '날짜' in col), '날짜')
         amount_col = next(
@@ -303,29 +288,30 @@ elif st.session_state.analysis_done:
             st.subheader("월별 총 발주량")
             monthly_orders = df_raw.groupby(pd.Grouper(key=date_col, freq='ME')).agg(
                 합계=(amount_col, 'sum')).reset_index()
-            monthly_orders['날짜_포맷'] = monthly_orders[date_col].dt.strftime(
+            monthly_orders['날짜_라벨'] = monthly_orders[date_col].dt.strftime(
                 '%Y년 %m월')
-            fig_month = px.line(monthly_orders, x='날짜_포맷',
-                                y='합계', title="월별 총 발주량", markers=True)
+            fig_month = px.line(monthly_orders, x='날짜_라벨', y='합계', title="월별 총 발주량",
+                                markers=True, labels={'날짜_라벨': '날짜', '합계': '발주량'})
             st.plotly_chart(fig_month, use_container_width=True)
 
         with viz_tab2:
             st.subheader("주별 총 발주량")
             weekly_orders = df_raw.groupby(pd.Grouper(
                 key=date_col, freq='W-MON')).agg(합계=(amount_col, 'sum')).reset_index()
-            weekly_orders['날짜_포맷'] = weekly_orders[date_col].dt.strftime(
-                '%m월 %d일')
-            fig_week = px.line(weekly_orders, x='날짜_포맷',
-                               y='합계', title="주별 총 발주량", markers=True)
+            weekly_orders['날짜_라벨'] = weekly_orders[date_col].dt.strftime(
+                '%Y년 %m월 %d일')
+            fig_week = px.line(weekly_orders, x='날짜_라벨', y='합계', title="주별 총 발주량",
+                               markers=True, labels={'날짜_라벨': '날짜', '합계': '발주량'})
             st.plotly_chart(fig_week, use_container_width=True)
 
         with viz_tab3:
             st.subheader("일별 총 발주량")
-            daily_orders = df_raw.groupby('날짜_포맷').agg(합계=(amount_col, 'sum'), 날짜=(
-                date_col, 'min')).reset_index().sort_values(by='날짜')
-            fig_day = px.line(daily_orders, x='날짜_포맷',
-                              y='합계', title="일별 총 발주량")
-            fig_day.update_traces(mode="lines+markers")
+            daily_orders = df_raw.groupby(date_col).agg(
+                합계=(amount_col, 'sum')).reset_index()
+            daily_orders['날짜_라벨'] = daily_orders[date_col].dt.strftime(
+                '%m월 %d일 (%a)')
+            fig_day = px.line(daily_orders, x='날짜_라벨', y='합계', title="일별 총 발주량", labels={
+                              '날짜_라벨': '날짜', '합계': '발주량'})
             st.plotly_chart(fig_day, use_container_width=True)
 
     with tab4:
