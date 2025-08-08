@@ -185,10 +185,9 @@ if agg_df is not None:
     st.success(f"✅ **{uploaded_file.name}** 파일 분석이 완료되었습니다.")
 
     tab1, tab2, tab3, tab4 = st.tabs(
-        ["[ 📈 클러스터링 분석 ]", "[ 🌟 신규 유망 도서 발굴 ]", "[ 📊 추가 시각화 ]", "[ 📋 전체 데이터 ]"])
+        ["[ 📈 클러스터링 분석 ]", "[ 🌟 신규 유망 도서 발굴 ]", "[ 📊 데이터 인사이트 ]", "[ 📋 전체 데이터 ]"])
 
     with tab1:
-        # ... (이전과 동일)
         st.header("K-Means 클러스터링 분석 결과")
         grade_order = [f"{i}등급" for i in range(1, 6)]
         fig = px.scatter_3d(
@@ -217,7 +216,7 @@ if agg_df is not None:
         st.header("🌟 신규 유망 도서 발굴 필터")
         st.info("아래 조건을 조절하여 '새롭고, 꾸준한' 유망 도서를 직접 찾아보세요.")
 
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
             max_days_since_first = int(agg_df['최초발주후경과일'].max())
             days_since_first_limit = st.slider("출시 기간 필터 (최초 발주 후 경과일)", 0, max_days_since_first, min(
@@ -225,21 +224,26 @@ if agg_df is not None:
         with col2:
             min_freq_limit = st.slider("최소 발주 횟수 필터", 1, int(
                 agg_df['발주횟수'].max()), 3, help="적어도 여기서 설정한 횟수 이상 발주된 도서만 필터링하여, 일회성 발주를 거릅니다.")
+
+        col3, col4 = st.columns(2)
         with col3:
             max_interval = int(agg_df['평균 발주 간격'].dropna().max(
             )) if not agg_df['평균 발주 간격'].isna().all() else 90
             interval_limit = st.slider("최대 평균 발주 간격 필터", 1, max_interval, min(
                 30, max_interval), help="발주 사이의 평균 기간이 여기서 설정한 일수보다 짧은, '꾸준한' 도서들만 필터링합니다.")
+        with col4:
+            min_amount_limit = st.slider("최소 총 발주량 필터", 0, int(
+                agg_df['총발주량'].max()), 10, help="누적 발주량이 여기서 설정한 값 이상인 도서만 필터링합니다.")
 
         promising_books_df = agg_df[
             (agg_df['최초발주후경과일'] <= days_since_first_limit) &
             (agg_df['발주횟수'] >= min_freq_limit) &
-            (agg_df['평균 발주 간격'].fillna(interval_limit + 1) <= interval_limit)
+            (agg_df['평균 발주 간격'].fillna(interval_limit + 1) <= interval_limit) &
+            (agg_df['총발주량'] >= min_amount_limit)
         ].sort_values(by='평균 발주 간격')
 
         st.subheader(f"필터링 결과: 총 {len(promising_books_df)}권의 유망 도서를 찾았습니다.")
 
-        # --- 개별 도서 판매 추이 그래프 ---
         book_col_name = next(
             (col for col in df_raw.columns if '도서명' in col), '도서명')
         date_col_name = next(
@@ -249,10 +253,14 @@ if agg_df is not None:
 
         for _, row in promising_books_df.iterrows():
             book_title = row[book_col_name]
-            with st.expander(f"'{book_title}' (평균 {row['평균 발주 간격']:.1f}일 간격 / 총 {row['발주횟수']}회 발주)"):
-                history_df = df_raw[df_raw[book_col_name] == book_title]
-                fig = px.bar(history_df, x=date_col_name,
-                             y=amount_col_name, title=f"'{book_title}' 일별 발주량 추이")
+            with st.expander(f"'{book_title}' (평균 {row['평균 발주 간격']:.1f}일 간격 / 총 {row['발주횟수']}회, {row['총발주량']}권 발주)"):
+                history_df = df_raw[df_raw[book_col_name] == book_title].copy()
+                # 날짜별로 발주량 합산
+                daily_history = history_df.groupby(
+                    date_col_name)[amount_col_name].sum().reset_index()
+
+                fig = px.line(daily_history, x=date_col_name, y=amount_col_name,
+                              title=f"'{book_title}' 일별 발주량 추이", markers=True)
                 fig.update_layout(yaxis_title="발주량")
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -261,23 +269,27 @@ if agg_df is not None:
         date_col = next((col for col in df_raw.columns if '날짜' in col), '날짜')
         amount_col = next(
             (col for col in df_raw.columns if '발주량' in col), '발주량')
-        grade_order = [f"{i}등급" for i in range(1, 6)]
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("① 월별 발주 트렌드")
+        viz_tab1, viz_tab2, viz_tab3 = st.tabs(
+            ["월별 발주 현황", "주별 발주 현황", "일별 발주 현황"])
+        with viz_tab1:
             monthly_orders = df_raw.set_index(date_col).resample('ME')[
                 amount_col].sum().reset_index()
             fig_line_month = px.line(monthly_orders, x=date_col, y=amount_col, markers=True,
                                      title="월별 총 발주량 변화", labels={date_col: '월', amount_col: '총 발주량'})
             st.plotly_chart(fig_line_month, use_container_width=True)
-        with col2:
-            st.subheader("② 주별 발주 트렌드")
+        with viz_tab2:
             weekly_orders = df_raw.set_index(date_col).resample(
                 'W-Mon')[amount_col].sum().reset_index()
             fig_line_week = px.line(weekly_orders, x=date_col, y=amount_col, markers=True,
                                     title="주별 총 발주량 변화", labels={date_col: '주', amount_col: '총 발주량'})
             st.plotly_chart(fig_line_week, use_container_width=True)
+        with viz_tab3:
+            daily_orders = df_raw.set_index(date_col).resample('D')[
+                amount_col].sum().reset_index()
+            fig_line_day = px.line(daily_orders, x=date_col, y=amount_col, title="일별 총 발주량 변화", labels={
+                                   date_col: '일', amount_col: '총 발주량'})
+            st.plotly_chart(fig_line_day, use_container_width=True)
 
     with tab4:
         st.header("전체 분석 데이터")
