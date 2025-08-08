@@ -5,32 +5,20 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import KMeans
 import plotly.express as px
 import io
+import locale
+
+# 한국어 요일 설정을 위해 로케일 설정
+try:
+    locale.setlocale(locale.LC_TIME, 'ko_KR.UTF-8')
+except locale.Error:
+    if 'locale_warning_shown' not in st.session_state:
+        st.warning("한국어 로케일(ko_KR.UTF-8)을 설정할 수 없습니다. 요일이 영어로 표시될 수 있습니다.")
+        st.session_state.locale_warning_shown = True
 
 # ----------------------------------------------------------------------
 # 데이터 처리 및 분석 함수
 # ----------------------------------------------------------------------
 
-@st.cache_data
-def get_date_range(uploaded_file):
-    """파일을 가볍게 읽어 날짜 범위(전체 기간)만 계산합니다."""
-    try:
-        uploaded_file.seek(0)
-        if uploaded_file.name.endswith('.csv'):
-            df_preview = pd.read_csv(uploaded_file, low_memory=False, usecols=lambda c: '날짜' in c)
-        else:
-            df_preview = pd.read_excel(uploaded_file, usecols=lambda c: '날짜' in c)
-        
-        date_col = next((col for col in df_preview.columns if '날짜' in col), None)
-        if not date_col: return 0
-
-        df_preview[date_col] = pd.to_datetime(df_preview[date_col], errors='coerce').dropna()
-        if len(df_preview[date_col]) < 2: return 0
-        
-        time_span = (df_preview[date_col].max() - df_preview[date_col].min()).days
-        uploaded_file.seek(0)
-        return time_span
-    except Exception:
-        return 0
 
 @st.cache_data
 def load_and_process_data(uploaded_file, k, lambda_param, w_amount, w_freq, w_recency):
@@ -43,27 +31,23 @@ def load_and_process_data(uploaded_file, k, lambda_param, w_amount, w_freq, w_re
             df_raw = pd.read_csv(uploaded_file, low_memory=False)
         else:
             df_raw = pd.read_excel(uploaded_file)
-        
+
         if df_raw.empty:
-            st.error("오류: 업로드된 파일에 분석할 데이터가 없습니다. 파일 내용을 확인해주세요.")
-            return None, None
-    except pd.errors.EmptyDataError:
-        st.error("오류: 업로드된 파일이 비어 있거나 데이터가 없습니다. 다른 파일을 업로드해주세요.")
-        return None, None
+            return None, "오류: 업로드된 파일에 분석할 데이터가 없습니다."
     except Exception as e:
-        st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-        return None, None
+        return None, f"파일을 읽는 중 오류가 발생했습니다: {e}"
 
     date_col = next((col for col in df_raw.columns if '날짜' in col), '날짜')
     book_col = next((col for col in df_raw.columns if '도서명' in col), '도서명')
     amount_col = next((col for col in df_raw.columns if '발주량' in col), '발주량')
 
     if not all(c in df_raw.columns for c in [date_col, book_col, amount_col]):
-        st.error(f"분석에 필요한 컬럼('{date_col}', '{book_col}', '{amount_col}') 중 일부를 찾을 수 없습니다.")
-        return None, None
+        return None, f"분석에 필요한 컬럼('{date_col}', '{book_col}', '{amount_col}') 중 일부를 찾을 수 없습니다."
 
     df_raw[date_col] = pd.to_datetime(df_raw[date_col], errors='coerce')
     df_raw.dropna(subset=[date_col, book_col, amount_col], inplace=True)
+
+    df_raw['날짜_포맷'] = df_raw[date_col].dt.strftime('%m월 %d일 (%a)')
 
     agg_df = df_raw.groupby(book_col).agg(
         총발주량=(amount_col, 'sum'),
@@ -73,10 +57,12 @@ def load_and_process_data(uploaded_file, k, lambda_param, w_amount, w_freq, w_re
     ).reset_index()
 
     duration = (agg_df['최근발주일'] - agg_df['최초발주일']).dt.days
-    agg_df['평균 발주 간격'] = np.where(agg_df['발주횟수'] > 1, duration / (agg_df['발주횟수'] - 1), np.nan)
+    agg_df['평균 발주 간격'] = np.where(
+        agg_df['발주횟수'] > 1, duration / (agg_df['발주횟수'] - 1), np.nan)
 
     def calculate_recency_score(days_diff, max_days, k_val, lambda_val):
-        if max_days == 0: return 1.0
+        if max_days == 0:
+            return 1.0
         scaled_diff = days_diff / max_days
         return 1 / (1 + scaled_diff * k_val) if scaled_diff <= 1 else np.exp(-scaled_diff * lambda_val)
 
@@ -84,36 +70,44 @@ def load_and_process_data(uploaded_file, k, lambda_param, w_amount, w_freq, w_re
     agg_df['최초발주후경과일'] = (기준일 - agg_df['최초발주일']).dt.days
     agg_df['경과일'] = (기준일 - agg_df['최근발주일']).dt.days
     max_days = agg_df['경과일'].max()
-    agg_df['시간가중치'] = agg_df['경과일'].apply(lambda x: calculate_recency_score(x, max_days, k, lambda_param))
+    agg_df['시간가중치'] = agg_df['경과일'].apply(
+        lambda x: calculate_recency_score(x, max_days, k, lambda_param))
 
     features = ['총발주량', '발주횟수', '시간가중치']
     scaler = MinMaxScaler()
     agg_df_scaled = agg_df.copy()
     agg_df_scaled[features] = scaler.fit_transform(agg_df_scaled[features])
-    
-    kmeans = KMeans(n_clusters=5, init='k-means++', n_init=10, max_iter=300, random_state=42)
+
+    kmeans = KMeans(n_clusters=5, init='k-means++',
+                    n_init=10, max_iter=300, random_state=42)
     agg_df['Cluster'] = kmeans.fit_predict(agg_df_scaled[features])
 
-    centroids_df_normalized = pd.DataFrame(kmeans.cluster_centers_, columns=features)
+    centroids_df_normalized = pd.DataFrame(
+        kmeans.cluster_centers_, columns=features)
     rank_score_series = (w_amount * centroids_df_normalized['총발주량'] +
                          w_freq * centroids_df_normalized['발주횟수'] +
                          w_recency * centroids_df_normalized['시간가중치'])
     centroids_df_normalized['rank_score'] = rank_score_series
-    
-    sorted_clusters = centroids_df_normalized['rank_score'].sort_values(ascending=False).index
-    
-    grade_map = {cluster_id: f"{i+1}등급" for i, cluster_id in enumerate(sorted_clusters)}
-    score_map = {cluster_id: score for cluster_id, score in zip(sorted_clusters, [5, 4, 3, 2, 1])}
+
+    sorted_clusters = centroids_df_normalized['rank_score'].sort_values(
+        ascending=False).index
+
+    grade_map = {cluster_id: f"{i+1}등급" for i,
+                 cluster_id in enumerate(sorted_clusters)}
+    score_map = {cluster_id: score for cluster_id,
+                 score in zip(sorted_clusters, [5, 4, 3, 2, 1])}
     agg_df['등급'] = agg_df['Cluster'].map(grade_map)
     agg_df['점수'] = agg_df['Cluster'].map(score_map)
 
     return agg_df, df_raw
+
 
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='analysis_result')
     return output.getvalue()
+
 
 # ----------------------------------------------------------------------
 # Streamlit 웹 애플리케이션 UI
@@ -123,44 +117,61 @@ st.title("📚 도서 발주 데이터 분석 대시보드")
 
 with st.sidebar:
     st.header("⚙️ 1. 분석 파일 업로드")
-    uploaded_file = st.file_uploader("CSV 또는 XLSX 발주서 파일을 업로드하세요.", type=["csv", "xlsx"])
+    uploaded_file = st.file_uploader(
+        "CSV 또는 XLSX 발주서 파일을 업로드하세요.", type=["csv", "xlsx"])
+
+    if uploaded_file:
+        time_span_days = get_date_range(uploaded_file)
+        if time_span_days <= 7:
+            k_default, lambda_default, period_text = 7.0, 0.5, "1주일 이내 (매우 민감)"
+        elif time_span_days <= 31:
+            k_default, lambda_default, period_text = 5.0, 0.7, "1개월 이내 (민감)"
+        elif time_span_days <= 182:
+            k_default, lambda_default, period_text = 2.0, 1.0, "6개월 이내 (보통)"
+        elif time_span_days <= 365:
+            k_default, lambda_default, period_text = 1.0, 1.5, "1년 이내 (표준)"
+        else:
+            k_default, lambda_default, period_text = 0.5, 2.0, "1년 이상 (둔감)"
+
+        st.header("⚙️ 2. 분석 민감도 설정")
+        st.info(f"데이터 기간: **{period_text}**")
+        k_param = st.slider("최신성 민감도 (k)", 0.1, 10.0, k_default, 0.1)
+        lambda_param = st.slider(
+            "장기 비활성 패널티 (λ)", 0.1, 10.0, lambda_default, 0.1)
+
+        st.header("⚙️ 3. 등급 결정 중요도 설정")
+        w_amount = st.slider("총발주량 중요도", 1, 5, 4)
+        w_freq = st.slider("발주횟수 중요도", 1, 5, 4)
+        w_recency = st.slider("시간가중치 중요도", 1, 5, 2)
+
+        run_button = st.button("🚀 분석 실행", type="primary",
+                               use_container_width=True)
+
+if 'run_button' not in st.session_state:
+    st.session_state.run_button = False
 
 if not uploaded_file:
     st.info("👈 사이드바에서 분석할 파일을 업로드해주세요.")
-    st.stop()
+elif run_button:
+    with st.spinner('데이터를 분석 중입니다. 잠시만 기다려주세요...'):
+        agg_df, df_raw_or_error = load_and_process_data(
+            uploaded_file, k_param, lambda_param, w_amount, w_freq, w_recency)
+        if agg_df is not None:
+            st.session_state.run_button = True
+            st.session_state.agg_df = agg_df
+            st.session_state.df_raw = df_raw_or_error
+            st.rerun()
+        else:
+            st.error(df_raw_or_error)
+            st.session_state.run_button = False
+elif st.session_state.run_button:
+    agg_df = st.session_state.agg_df
+    df_raw = st.session_state.df_raw
 
-time_span_days = get_date_range(uploaded_file)
-
-if time_span_days <= 7:
-    k_default, lambda_default, period_text = 7.0, 0.5, "1주일 이내 (매우 민감)"
-elif time_span_days <= 31:
-    k_default, lambda_default, period_text = 5.0, 0.7, "1개월 이내 (민감)"
-elif time_span_days <= 182:
-    k_default, lambda_default, period_text = 2.0, 1.0, "6개월 이내 (보통)"
-elif time_span_days <= 365:
-    k_default, lambda_default, period_text = 1.0, 1.5, "1년 이내 (표준)"
-else:
-    k_default, lambda_default, period_text = 0.5, 2.0, "1년 이상 (둔감)"
-
-with st.sidebar:
-    st.header("⚙️ 2. 분석 민감도 설정")
-    st.info(f"데이터 기간: **{period_text}**")
-    k_param = st.slider("최신성 민감도 (k)", 0.1, 10.0, k_default, 0.1, help="값이 클수록 최근 발주에 더 높은 가중치를 부여합니다.")
-    lambda_param = st.slider("장기 비활성 패널티 (λ)", 0.1, 10.0, lambda_default, 0.1, help="이 값은 매우 오래된 데이터에 대한 패널티로 작용합니다.")
-    
-    st.header("⚙️ 3. 등급 결정 중요도 설정")
-    st.markdown("각 지표가 등급 결정에 얼마나 중요하게 작용할지 가중치를 조절합니다.")
-    w_amount = st.slider("총발주량 중요도", 1, 5, 4)
-    w_freq = st.slider("발주횟수 중요도", 1, 5, 4)
-    w_recency = st.slider("시간가중치 중요도", 1, 5, 2)
-
-
-agg_df, df_raw = load_and_process_data(uploaded_file, k_param, lambda_param, w_amount, w_freq, w_recency)
-
-if agg_df is not None:
     st.success(f"✅ **{uploaded_file.name}** 파일 분석이 완료되었습니다.")
-    
-    tab1, tab2, tab3, tab4 = st.tabs(["[ 📈 클러스터링 요약 ]", "[ 🌟 신규 유망 도서 발굴 ]", "[ 📊 데이터 인사이트 ]", "[ 📋 전체 데이터 ]"])
+
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["[ 📈 등급 요약 ]", "[ 🌟 유망 도서 발굴 ]", "[ 📊 데이터 인사이트 ]", "[ 📋 전체 데이터 ]"])
 
     with tab1:
         st.header("등급별 요약")
@@ -168,11 +179,12 @@ if agg_df is not None:
         with col1:
             st.subheader("① 등급별 도서 분포")
             grade_order = [f"{i}등급" for i in range(1, 6)]
-            grade_counts = agg_df['등급'].value_counts().reindex(grade_order).reset_index()
+            grade_counts = agg_df['등급'].value_counts().reindex(
+                grade_order).reset_index()
             fig_bar = px.bar(grade_counts, x='등급', y='count', color='등급', text_auto=True, category_orders={"등급": grade_order},
                              color_discrete_map={'1등급': '#0081CF', '2등급': '#00A1E0', '3등급': '#7ECEF4', '4등급': '#B1DFF7', '5등급': '#CCCCCC'}, title="포트폴리오 등급별 도서 수")
             st.plotly_chart(fig_bar, use_container_width=True)
-        
+
         with col2:
             st.subheader("② 등급별 의미와 전략")
             st.markdown("""
@@ -184,30 +196,28 @@ if agg_df is not None:
             | **4등급** | 발주가 뜸하거나 감소 추세인 **주의 그룹** | **재고 최소화**, 발주 감소 원인 분석 (계절성, 경쟁 등) |
             | **5등급** | 사실상 발주가 없는 **비활성/관리 그룹** | **재고 처분 고려 (이벤트, 할인)**, 사실상 단종 검토 |
             """)
-
-        with st.expander("📈 등급은 어떻게 결정되나요? (분류 기준 설명)"):
-            st.markdown(f"""
-            **1️⃣ 핵심 지표 및 정규화**: **총발주량, 발주횟수, 시간가중치**의 상대적 크기를 비교하기 위해 모든 값을 0~1 사이의 점수로 변환합니다.<br>
-            **2️⃣ 가중치 기반 순위 결정 (현재 설정: 발주량 {w_amount} : 발주횟수 {w_freq} : 시간가중치 {w_recency})**: 알고리즘이 자동으로 분류한 5개 그룹의 평균 점수에 **사용자가 설정한 중요도 가중치**를 곱하여 최종 '순위 점수'를 계산하고, 이 점수가 높은 순서대로 **1등급부터 5등급**을 부여합니다.
-            """, unsafe_allow_html=True)
-
     with tab2:
-        st.header("🌟 신규 유망 도서 발굴 필터")
+        st.header("🌟 신규 유망 도서 발굴")
         st.info("아래 조건을 조절하여 '새롭고, 꾸준한' 유망 도서를 직접 찾아보세요.")
-        
+
         col1, col2 = st.columns(2)
         with col1:
             max_days_since_first = int(agg_df['최초발주후경과일'].max())
-            days_since_first_limit = st.slider("출시 기간 필터 (최초 발주 후 경과일)", 0, max_days_since_first, min(180, max_days_since_first), help="이 슬라이더로 설정한 일수 이내에 최초로 발주된 '신상' 도서들만 필터링합니다.")
+            days_since_first_limit = st.slider(
+                "출시 기간 필터 (일)", 0, max_days_since_first, min(180, max_days_since_first))
         with col2:
-            min_freq_limit = st.slider("최소 발주 횟수 필터", 1, int(agg_df['발주횟수'].max()), 3, help="적어도 여기서 설정한 횟수 이상 발주된 도서만 필터링하여, 일회성 발주를 거릅니다.")
-        
+            min_freq_limit = st.slider(
+                "최소 발주 횟수 필터", 1, int(agg_df['발주횟수'].max()), 3)
+
         col3, col4 = st.columns(2)
         with col3:
-            max_interval = int(agg_df['평균 발주 간격'].dropna().max()) if not agg_df['평균 발주 간격'].isna().all() else 90
-            interval_limit = st.slider("최대 평균 발주 간격 필터", 1, max_interval, min(30, max_interval), help="발주 사이의 평균 기간이 여기서 설정한 일수보다 짧은, '꾸준한' 도서들만 필터링합니다.")
+            max_interval = int(agg_df['평균 발주 간격'].dropna().max(
+            )) if not agg_df['평균 발주 간격'].isna().all() else 90
+            interval_limit = st.slider(
+                "최대 평균 발주 간격 필터", 1, max_interval, min(30, max_interval))
         with col4:
-            min_amount_limit = st.slider("최소 총 발주량 필터", 0, int(agg_df['총발주량'].max()), 10, help="누적 발주량이 여기서 설정한 값 이상인 도서만 필터링합니다.")
+            min_amount_limit = st.slider(
+                "최소 총 발주량 필터", 0, int(agg_df['총발주량'].max()), 10)
 
         promising_books_df = agg_df[
             (agg_df['최초발주후경과일'] <= days_since_first_limit) &
@@ -215,74 +225,102 @@ if agg_df is not None:
             (agg_df['평균 발주 간격'].fillna(interval_limit + 1) <= interval_limit) &
             (agg_df['총발주량'] >= min_amount_limit)
         ].sort_values(by='평균 발주 간격')
-        
-        st.subheader(f"필터링 결과: 총 {len(promising_books_df)}권의 유망 도서를 찾았습니다.")
-        
-        book_col_name = next((col for col in df_raw.columns if '도서명' in col), '도서명')
-        date_col_name = next((col for col in df_raw.columns if '날짜' in col), '날짜')
-        amount_col_name = next((col for col in df_raw.columns if '발주량' in col), '발주량')
 
-        for _, row in promising_books_df.iterrows():
-            book_title = row[book_col_name]
-            with st.expander(f"'{book_title}' (평균 {row['평균 발주 간격']:.1f}일 간격 / 총 {row['발주횟수']}회, {row['총발주량']}권 발주)"):
-                history_df = df_raw[df_raw[book_col_name] == book_title].copy()
-                daily_history = history_df.groupby(date_col_name)[amount_col_name].sum().reset_index()
-                
-                fig = px.line(daily_history, x=date_col_name, y=amount_col_name, title=f"'{book_title}' 일별 발주량 추이", markers=True)
-                fig.update_layout(yaxis_title="발주량")
-                st.plotly_chart(fig, use_container_width=True)
+        st.subheader(f"필터링 결과: 총 {len(promising_books_df)}권의 유망 도서를 찾았습니다.")
+
+        book_col_name = next(
+            (col for col in df_raw.columns if '도서명' in col), '도서명')
+        book_list = ["- 도서 선택 -"] + promising_books_df[book_col_name].tolist()
+        selected_book = st.selectbox("추이 그래프를 볼 도서를 선택하세요:", book_list)
+
+        if selected_book != "- 도서 선택 -":
+            history_df = df_raw[df_raw[book_col_name] == selected_book].copy()
+            daily_history = history_df.groupby('날짜_포맷').agg(
+                발주량=(next(col for col in df_raw.columns if '발주량' in col), 'sum'),
+                날짜=(next(col for col in df_raw.columns if '날짜' in col), 'min')
+            ).reset_index().sort_values(by='날짜')
+
+            fig = px.line(daily_history, x='날짜_포맷', y='발주량',
+                          title=f"'{selected_book}' 일별 발주량 추이", markers=True)
+            fig.update_layout(yaxis_title="발주량", xaxis_title="날짜")
+            st.plotly_chart(fig, use_container_width=True)
 
     with tab3:
         st.header("데이터 인사이트 시각화")
         date_col = next((col for col in df_raw.columns if '날짜' in col), '날짜')
-        amount_col = next((col for col in df_raw.columns if '발주량' in col), '발주량')
-        
-        viz_tab1, viz_tab2, viz_tab3, viz_tab4 = st.tabs(["전체 발주 현황", "클러스터링 분포", "월별 발주 현황", "주별 발주 현황"])
+        amount_col = next(
+            (col for col in df_raw.columns if '발주량' in col), '발주량')
+
+        # --- 시각화 탭 구조 수정 ---
+        viz_tab1, viz_tab2, viz_tab3, viz_tab4 = st.tabs(
+            ["전체 발주 현황", "월별 발주 현황", "주별 발주 현황", "일별 발주 현황"])
+
         with viz_tab1:
-            st.subheader("일별 총 발주량")
-            daily_orders = df_raw.set_index(date_col).resample('D')[amount_col].sum().reset_index()
-            fig_line_day = px.line(daily_orders, x=date_col, y=amount_col, title="일별 총 발주량 변화", labels={date_col: '일', amount_col: '총 발주량'})
-            st.plotly_chart(fig_line_day, use_container_width=True)
+            st.subheader("주요 트렌드 요약")
+            col1, col2 = st.columns(2)
+            with col1:
+                monthly_orders = df_raw.groupby(pd.Grouper(key=date_col, freq='ME')).agg(
+                    합계=(amount_col, 'sum')).reset_index()
+                monthly_orders['날짜_포맷'] = monthly_orders[date_col].dt.strftime(
+                    '%Y년 %m월')
+                fig_month = px.line(monthly_orders, x='날짜_포맷',
+                                    y='합계', title="월별 총 발주량", markers=True)
+                st.plotly_chart(fig_month, use_container_width=True)
+            with col2:
+                weekly_orders = df_raw.groupby(pd.Grouper(
+                    key=date_col, freq='W-MON')).agg(합계=(amount_col, 'sum')).reset_index()
+                weekly_orders['날짜_포맷'] = weekly_orders[date_col].dt.strftime(
+                    '%m월 %d일')
+                fig_week = px.line(weekly_orders, x='날짜_포맷',
+                                   y='합계', title="주별 총 발주량", markers=True)
+                st.plotly_chart(fig_week, use_container_width=True)
+
         with viz_tab2:
-            st.subheader("3D 클러스터링 분포")
-            # --- 데이터 샘플링 로직 ---
-            plot_df = agg_df
-            if len(agg_df) > 1000:
-                st.info(f"데이터가 너무 많아({len(agg_df)}개), 속도를 위해 1000개의 샘플만 표시합니다.")
-                plot_df = agg_df.sample(n=1000, random_state=1)
-            
-            grade_order = [f"{i}등급" for i in range(1, 6)]
-            fig = px.scatter_3d(
-                plot_df, x='총발주량', y='발주횟수', z='시간가중치', color='등급',
-                color_discrete_map={'1등급': '#0081CF', '2등급': '#00A1E0', '3등급': '#7ECEF4', '4등급': '#B1DFF7', '5등급': '#CCCCCC'},
-                category_orders={"등급": grade_order}, hover_name='도서명',
-                hover_data={'등급': True, '총발주량': ':.0f', '발주횟수': ':.0f', '최초발주일': '%Y-%m-%d', '평균 발주 간격':':.1f', '도서명': False},
-                title='총발주량-발주횟수-시간가중치 기반 클러스터'
-            )
-            fig.update_layout(margin=dict(l=0, r=0, b=0, t=40), height=600)
-            st.plotly_chart(fig, use_container_width=True)
+            st.subheader("월별 총 발주량 상세")
+            monthly_orders = df_raw.groupby(pd.Grouper(key=date_col, freq='ME')).agg(
+                합계=(amount_col, 'sum')).reset_index()
+            monthly_orders['날짜_포맷'] = monthly_orders[date_col].dt.strftime(
+                '%Y년 %m월')
+            fig_month_detail = px.bar(
+                monthly_orders, x='날짜_포맷', y='합계', title="월별 총 발주량 (상세)", text_auto=True)
+            st.plotly_chart(fig_month_detail, use_container_width=True)
+
         with viz_tab3:
-            st.subheader("월별 총 발주량")
-            monthly_orders = df_raw.set_index(date_col).resample('ME')[amount_col].sum().reset_index()
-            fig_line_month = px.line(monthly_orders, x=date_col, y=amount_col, markers=True, title="월별 총 발주량 변화", labels={date_col: '월', amount_col: '총 발주량'})
-            st.plotly_chart(fig_line_month, use_container_width=True)
+            st.subheader("주별 총 발주량 상세")
+            weekly_orders = df_raw.groupby(pd.Grouper(
+                key=date_col, freq='W-MON')).agg(합계=(amount_col, 'sum')).reset_index()
+            weekly_orders['날짜_포맷'] = weekly_orders[date_col].dt.strftime(
+                '%Y-%m-%d')
+            fig_week_detail = px.bar(
+                weekly_orders, x='날짜_포맷', y='합계', title="주별 총 발주량 (상세)", text_auto='.2s')
+            st.plotly_chart(fig_week_detail, use_container_width=True)
+
         with viz_tab4:
-            st.subheader("주별 총 발주량")
-            weekly_orders = df_raw.set_index(date_col).resample('W-Mon')[amount_col].sum().reset_index()
-            fig_line_week = px.line(weekly_orders, x=date_col, y=amount_col, markers=True, title="주별 총 발주량 변화", labels={date_col: '주', amount_col: '총 발주량'})
-            st.plotly_chart(fig_line_week, use_container_width=True)
+            st.subheader("일별 총 발주량 상세")
+            daily_orders = df_raw.groupby('날짜_포맷').agg(합계=(amount_col, 'sum'), 날짜=(
+                date_col, 'min')).reset_index().sort_values(by='날짜')
+            fig_day_detail = px.line(
+                daily_orders, x='날짜_포맷', y='합계', title="일별 총 발주량")
+            fig_day_detail.update_traces(mode="lines+markers")
+            st.plotly_chart(fig_day_detail, use_container_width=True)
 
     with tab4:
         st.header("전체 분석 데이터")
-        display_columns = ['도서명', '등급', '점수', '총발주량', '발주횟수', '시간가중치', '평균 발주 간격', '최초발주일', '최근발주일', '경과일']
-        final_df = agg_df[display_columns].sort_values(by='점수', ascending=False)
+        display_columns = ['도서명', '등급', '점수', '총발주량', '발주횟수',
+                           '시간가중치', '평균 발주 간격', '최초발주일', '최근발주일', '경과일']
+        final_df = agg_df[display_columns].sort_values(
+            by='점수', ascending=False)
         st.dataframe(final_df, use_container_width=True)
-        
+
         st.subheader("결과 다운로드")
         col1, col2 = st.columns(2)
         with col1:
             csv_data = final_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("💾 CSV 파일로 다운로드", data=csv_data, file_name='book_cluster_analysis.csv', mime='text/csv', use_container_width=True)
+            st.download_button("💾 CSV 파일로 다운로드", data=csv_data,
+                               file_name='book_cluster_analysis.csv', mime='text/csv', use_container_width=True)
         with col2:
             excel_data = to_excel(final_df)
-            st.download_button("💾 XLSX 파일로 다운로드", data=excel_data, file_name='book_cluster_analysis.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
+            st.download_button("💾 XLSX 파일로 다운로드", data=excel_data, file_name='book_cluster_analysis.xlsx',
+                               mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
+else:
+    st.info("사이드바에서 파일을 업로드하고 설정을 마친 후 '분석 실행' 버튼을 눌러주세요.")
