@@ -14,18 +14,51 @@ from pytrends.request import TrendReq
 
 @st.cache_data(ttl=3600)
 def get_keyword_trend(keyword):
-    """특정 키워드에 대한 Google Trends 데이터를 가져옵니다."""
+    """특정 키워드에 대한 Google Trends 데이터와 분석 점수를 반환합니다."""
     if not keyword:
-        return None, "분석할 키워드를 입력해주세요."
+        return None, "분석할 키워드를 입력해주세요.", None
     try:
         pytrends = TrendReq(hl='ko-KR', tz=540)
         pytrends.build_payload(kw_list=[keyword], timeframe='today 12-m')
         df = pytrends.interest_over_time()
-        if df.empty or keyword not in df.columns:
-            return None, f"'{keyword}'에 대한 트렌드 데이터를 찾을 수 없습니다."
-        return df[[keyword]], None
+
+        if df.empty or keyword not in df.columns or df[keyword].sum() == 0:
+            return None, f"'{keyword}'에 대한 트렌드 데이터를 찾을 수 없습니다.", None
+
+        # --- 트렌드 점수 계산 ---
+        latest_90_days = df[keyword].iloc[-90:]
+        previous_90_days = df[keyword].iloc[-180:-90]
+
+        peak_interest = df[keyword].max()
+        peak_date = df[keyword].idxmax().strftime('%Y년 %m월 %d일')
+        recent_avg = latest_90_days.mean()
+        previous_avg = previous_90_days.mean() if not previous_90_days.empty else 0
+
+        recent_performance_score = (
+            recent_avg / peak_interest) * 100 if peak_interest > 0 else 0
+
+        if previous_avg > 0:
+            growth_ratio = recent_avg / previous_avg
+            momentum_score = np.interp(
+                growth_ratio, [0.5, 1.0, 1.5], [0, 50, 100])
+        else:
+            growth_ratio = "N/A"
+            momentum_score = 100
+
+        total_score = (recent_performance_score * 0.6) + (momentum_score * 0.4)
+
+        analysis_result = {
+            "total_score": total_score,
+            "peak_interest": peak_interest,
+            "peak_date": peak_date,
+            "recent_avg": recent_avg,
+            "growth_ratio": growth_ratio
+        }
+
+        return df[[keyword]], None, analysis_result
+
     except Exception as e:
-        return None, f"Google 트렌드 데이터를 가져오는 중 오류가 발생했습니다: {e}"
+        return None, f"Google 트렌드 데이터를 가져오는 중 오류가 발생했습니다: {e}", None
 
 # ----------------------------------------------------------------------
 # 데이터 처리 및 분석 함수
@@ -218,7 +251,6 @@ elif st.session_state.analysis_done:
 
     st.success(f"✅ **{st.session_state.file_name}** 파일 분석이 완료되었습니다.")
 
-    # --- 탭 복구 ---
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         ["[ 📈 등급 요약 ]", "[ 🌟 유망 도서 발굴 ]", "[ 📊 데이터 인사이트 ]", "[ 🔍 시장 트렌드 분석 ]", "[ 📋 전체 데이터 ]"])
 
@@ -369,11 +401,28 @@ elif st.session_state.analysis_done:
             "분석할 키워드를 입력하세요 (예: 인공지능, 에세이, 주식 투자):", "에세이")
 
         if keyword_input:
-            trend_df, error_message = get_keyword_trend(keyword_input)
+            trend_df, error_message, analysis_result = get_keyword_trend(
+                keyword_input)
 
             if error_message:
                 st.error(error_message)
-            elif trend_df is not None:
+            elif trend_df is not None and analysis_result is not None:
+                st.subheader(f"'{keyword_input}' 키워드 분석 요약")
+                col1, col2, col3 = st.columns(3)
+                col1.metric(label="📈 시장 트렌드 점수",
+                            value=f"{analysis_result['total_score']:.1f} 점")
+                col2.metric(label="최근 3개월 평균 관심도",
+                            value=f"{analysis_result['recent_avg']:.1f}")
+                col3.metric(
+                    label="연간 최고 관심도", value=f"{analysis_result['peak_interest']}", help=f"{analysis_result['peak_date']}에 기록")
+
+                with st.expander("💯 '시장 트렌드 점수'는 어떻게 계산되나요?"):
+                    st.markdown("""
+                    '시장 트렌드 점수'는 최근 1년간의 검색량 데이터를 바탕으로, 해당 키워드의 **시장 매력도**를 0점에서 100점 사이로 환산한 값입니다. 점수는 아래 두 가지 핵심 지표를 가중 평균하여 계산됩니다.
+                    1.  **최근 성과 (60% 가중치)**: 최근 3개월의 평균 관심도가 지난 1년 중 최고 관심도(100)에 비해 얼마나 높은지를 측정합니다. (현재 시장의 크기)
+                    2.  **성장 모멘텀 (40% 가중치)**: 최근 3개월의 평균 관심도가 그 이전 3개월에 비해 얼마나 성장했는지를 측정합니다. (현재 시장의 성장성)
+                    """)
+
                 st.subheader(f"'{keyword_input}' 키워드 관심도 변화 (지난 1년)")
                 fig_trend = px.line(trend_df, y=keyword_input,
                                     title=f"'{keyword_input}' 검색 관심도 추이")
