@@ -17,7 +17,10 @@ def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_f
     파일 내용을 입력받아 데이터 처리 및 분석을 수행합니다.
     """
     try:
-        file_extension = st.session_state.file_name.split('.')[-1]
+        # st.session_state에서 파일 이름 가져오기
+        file_name = st.session_state.get('file_name', '')
+        file_extension = file_name.split('.')[-1]
+
         if file_extension == 'csv':
             df_raw = pd.read_csv(io.BytesIO(
                 uploaded_file_contents), low_memory=False)
@@ -71,7 +74,6 @@ def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_f
     features = ['총발주량', '발주횟수', '시간가중치']
     scaler = MinMaxScaler()
 
-    # 정규화된 값을 별도 컬럼으로 저장
     norm_features = [f + '_정규화' for f in features]
     agg_df[norm_features] = scaler.fit_transform(agg_df[features])
 
@@ -79,20 +81,20 @@ def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_f
                     n_init=10, max_iter=300, random_state=42)
     agg_df['Cluster'] = kmeans.fit_predict(agg_df[norm_features])
 
-    # --- 등급 결정 로직 (K-Means 기반) ---
     centroids_df_normalized = pd.DataFrame(
         kmeans.cluster_centers_, columns=norm_features)
     rank_score_series = (w_amount * centroids_df_normalized['총발주량_정규화'] +
                          w_freq * centroids_df_normalized['발주횟수_정규화'] +
                          w_recency * centroids_df_normalized['시간가중치_정규화'])
     centroids_df_normalized['rank_score'] = rank_score_series
+
     sorted_clusters = centroids_df_normalized['rank_score'].sort_values(
         ascending=False).index
+
     grade_map = {cluster_id: f"{i+1}등급" for i,
                  cluster_id in enumerate(sorted_clusters)}
     agg_df['등급'] = agg_df['Cluster'].map(grade_map)
 
-    # --- 종합 점수 계산 로직 (소수점) ---
     total_weight = w_amount + w_freq + w_recency
     agg_df['종합 점수'] = (
         (w_amount * agg_df['총발주량_정규화'] +
@@ -100,7 +102,6 @@ def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_f
          w_recency * agg_df['시간가중치_정규화']) / total_weight
     ) * 100
 
-    # 불필요한 정규화 컬럼 삭제
     agg_df.drop(columns=norm_features, inplace=True)
 
     return agg_df, df_raw
@@ -146,7 +147,7 @@ with st.sidebar:
             df_preview[date_col_name] = pd.to_datetime(
                 df_preview[date_col_name], errors='coerce').dropna()
             time_span_days = (df_preview[date_col_name].max(
-            ) - df_preview[date_col_name].min()).days
+            ) - df_preview[date_col_name].min()).days if not df_preview.empty else 0
         except Exception:
             time_span_days = 365
 
@@ -198,73 +199,143 @@ elif st.session_state.analysis_done:
 
     with tab1:
         st.header("등급별 요약")
-        # ... (이전 코드와 동일)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("① 등급별 도서 분포")
+            grade_order = [f"{i}등급" for i in range(1, 6)]
+            grade_counts = agg_df['등급'].value_counts().reindex(
+                grade_order).reset_index()
+            fig_bar = px.bar(grade_counts, x='등급', y='count', color='등급', text_auto=True, category_orders={"등급": grade_order},
+                             color_discrete_map={'1등급': '#0081CF', '2등급': '#00A1E0', '3등급': '#7ECEF4', '4등급': '#B1DFF7', '5등급': '#CCCCCC'}, title="포트폴리오 등급별 도서 수")
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        with col2:
+            st.subheader("② 등급별 의미와 전략")
+            st.markdown("""
+            | 등급 | 의미 및 상태 | 추천 전략 |
+            | :---: | :--- | :--- |
+            | **1등급** | **최상위 핵심 그룹** | **재고 최우선 확보**, 적극적인 마케팅 |
+            | **2등급** | 꾸준한 **우수 그룹** | **안정적인 재고 수준 유지**, 크로스셀링 |
+            | **3등급** | **성장/하락 가능성** 보유 그룹 | 수요 예측, 판매 촉진 전략 고민 |
+            | **4등급** | 발주가 뜸한 **주의 그룹** | **재고 최소화**, 원인 분석 |
+            | **5등급** | **비활성/관리 그룹** | **재고 처분 및 단종** 검토 |
+            """)
+
     with tab2:
         st.header("🌟 신규 유망 도서 발굴")
         book_col_name = next(
             (col for col in df_raw.columns if '도서명' in col), '도서명')
 
-        # ... (필터 UI 이전과 동일)
         col1, col2 = st.columns(2)
-        # ... (이하 필터 UI 코드 생략)
+        with col1:
+            days_since_first_limit = st.slider("출시 기간 필터 (일)", 0, int(
+                agg_df['최초발주후경과일'].max()), min(180, int(agg_df['최초발주후경과일'].max())))
+        with col2:
+            min_freq_limit = st.slider(
+                "최소 발주 횟수 필터", 1, int(agg_df['발주횟수'].max()), 3)
+
+        col3, col4 = st.columns(2)
+        with col3:
+            max_interval = int(agg_df['평균 발주 간격'].dropna().max(
+            )) if not agg_df['평균 발주 간격'].isna().all() else 90
+            interval_limit = st.slider(
+                "최대 평균 발주 간격 필터", 1, max_interval, min(30, max_interval))
+        with col4:
+            min_amount_limit = st.slider(
+                "최소 총 발주량 필터", 0, int(agg_df['총발주량'].max()), 10)
 
         promising_books_df = agg_df[
-            # ... (필터링 로직 이전과 동일)
+            (agg_df['최초발주후경과일'] <= days_since_first_limit) &
+            (agg_df['발주횟수'] >= min_freq_limit) &
+            (agg_df['평균 발주 간격'].fillna(interval_limit + 1) <= interval_limit) &
+            (agg_df['총발주량'] >= min_amount_limit)
         ]
 
         st.subheader(f"필터링 결과: 총 {len(promising_books_df)}권의 유망 도서를 찾았습니다.")
 
         col_sort1, col_sort2 = st.columns(2)
         with col_sort1:
-            sort_by_options = {
-                "종합 점수": "종합 점수",  # 정렬 기준에 '종합 점수' 추가
-                "평균 발주 간격": "평균 발주 간격",
-                "총발주량": "총발주량",
-                "발주 횟수": "발주횟수",
-                "출시일": "최초발주후경과일"
-            }
+            sort_by_options = {"종합 점수": "종합 점수", "평균 발주 간격": "평균 발주 간격",
+                               "총발주량": "총발주량", "발주 횟수": "발주횟수", "출시일": "최초발주후경과일"}
             sort_by = st.selectbox(
                 "정렬 기준 선택", options=list(sort_by_options.keys()))
         with col_sort2:
-            sort_order = st.selectbox(
-                "정렬 순서 선택", options=["내림차순", "오름차순"])  # 내림차순을 기본으로
+            sort_order = st.selectbox("정렬 순서 선택", options=["내림차순", "오름차순"])
 
-        is_ascending = (sort_order == "오름차순")
         promising_books_df = promising_books_df.sort_values(
-            by=sort_by_options[sort_by], ascending=is_ascending)
+            by=sort_by_options[sort_by], ascending=(sort_order == "오름차순"))
 
         for _, row in promising_books_df.iterrows():
             book_title = row[book_col_name]
-            # expander 제목에 '종합 점수' 표시
             with st.expander(f"'{book_title}' (종합점수: {row['종합 점수']:.2f}점 / 평균 {row['평균 발주 간격']:.1f}일 간격)"):
                 history_df = df_raw[df_raw[book_col_name] == book_title].copy()
                 daily_history = history_df.groupby(next(col for col in history_df.columns if '날짜' in col)).agg(
                     일일_발주량=(
-                        next(col for col in history_df.columns if '발주량' in col), 'sum')
+                        next(col for col in history_df.columns if '발주량' in col), 'sum'),
+                    날짜_라벨=('날짜_라벨', 'first')  # 그룹화된 첫번째 라벨 사용
                 ).reset_index()
-                daily_history['날짜_라벨'] = daily_history[next(
-                    col for col in daily_history.columns if '날짜' in col)].dt.strftime('%m월 %d일 (%a)')
 
-                fig = px.line(daily_history, x='날짜_라벨', y='일일_발주량',
-                              title=f"'{book_title}' 발주량 추이", markers=True)
-                fig.update_layout(yaxis_title="발주량", xaxis_title="날짜")
+                fig = px.line(daily_history, x='날짜_라벨', y='일일_발주량', title=f"'{book_title}' 발주량 추이", markers=True, labels={
+                              '날짜_라벨': '날짜', '일일_발주량': '발주량'})
                 st.plotly_chart(fig, use_container_width=True)
 
     with tab3:
-        # ... (이전 코드와 동일)
+        st.header("데이터 인사이트 시각화")
+        date_col = next((col for col in df_raw.columns if '날짜' in col), '날짜')
+        amount_col = next(
+            (col for col in df_raw.columns if '발주량' in col), '발주량')
+
+        viz_tab1, viz_tab2, viz_tab3 = st.tabs(
+            ["월별 발주 현황", "주별 발주 현황", "일별 발주 현황"])
+
+        with viz_tab1:
+            st.subheader("월별 총 발주량")
+            monthly_orders = df_raw.groupby(pd.Grouper(key=date_col, freq='ME')).agg(
+                합계=(amount_col, 'sum')).reset_index()
+            monthly_orders['날짜_라벨'] = monthly_orders[date_col].dt.strftime(
+                '%Y년 %m월')
+            fig_month = px.line(monthly_orders, x='날짜_라벨', y='합계', title="월별 총 발주량",
+                                markers=True, labels={'날짜_라벨': '날짜', '합계': '발주량'})
+            st.plotly_chart(fig_month, use_container_width=True)
+
+        with viz_tab2:
+            st.subheader("주별 총 발주량")
+            weekly_orders = df_raw.groupby(pd.Grouper(
+                key=date_col, freq='W-MON')).agg(합계=(amount_col, 'sum')).reset_index()
+            weekly_orders['날짜_라벨'] = weekly_orders[date_col].dt.strftime(
+                '%m월 %d일')
+            fig_week = px.line(weekly_orders, x='날짜_라벨', y='합계', title="주별 총 발주량",
+                               markers=True, labels={'날짜_라벨': '날짜', '합계': '발주량'})
+            st.plotly_chart(fig_week, use_container_width=True)
+
+        with viz_tab3:
+            st.subheader("일별 총 발주량")
+            daily_orders = df_raw.groupby(date_col).agg(
+                합계=(amount_col, 'sum')).reset_index()
+            daily_orders['날짜_라벨'] = daily_orders[date_col].dt.strftime(
+                '%m월 %d일 (%a)')
+            fig_day = px.line(daily_orders, x='날짜_라벨', y='합계', title="일별 총 발주량", labels={
+                              '날짜_라벨': '날짜', '합계': '발주량'})
+            st.plotly_chart(fig_day, use_container_width=True)
+
     with tab4:
         st.header("전체 분석 데이터")
-        # 표시 컬럼에 '종합 점수' 추가, '점수' 제거
         display_columns = ['도서명', '등급', '종합 점수', '총발주량',
                            '발주횟수', '시간가중치', '평균 발주 간격', '최초발주일', '최근발주일', '경과일']
-        # '종합 점수' 기준으로 정렬
         final_df = agg_df[display_columns].sort_values(
             by='종합 점수', ascending=False)
-        # 소수점 둘째 자리까지 표시
         st.dataframe(final_df.style.format(
-            {'종합 점수': "{:.2f}"}), use_container_width=True)
+            {'종합 점수': "{:.2f}", '시간가중치': "{:.3f}", '평균 발주 간격': "{:.1f}"}), use_container_width=True)
 
         st.subheader("결과 다운로드")
-        # ... (다운로드 버튼 이전과 동일)
+        col1, col2 = st.columns(2)
+        with col1:
+            csv_data = final_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("💾 CSV 파일로 다운로드", data=csv_data,
+                               file_name='book_cluster_analysis.csv', mime='text/csv', use_container_width=True)
+        with col2:
+            excel_data = to_excel(final_df)
+            st.download_button("💾 XLSX 파일로 다운로드", data=excel_data, file_name='book_cluster_analysis.xlsx',
+                               mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True)
 else:
     st.info("사이드바에서 파일을 업로드하고 설정을 마친 후 '분석 실행' 버튼을 눌러주세요.")
