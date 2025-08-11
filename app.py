@@ -8,29 +8,30 @@ import io
 from pytrends.request import TrendReq
 
 # ----------------------------------------------------------------------
-# 시장 트렌드 분석 함수
+# 시장 트렌드 분석 함수 (비교 기능 추가)
 # ----------------------------------------------------------------------
 
 
 @st.cache_data(ttl=3600)
-def get_keyword_trend(keyword):
-    """특정 키워드에 대한 Google Trends 데이터와 분석 점수를 반환합니다."""
-    if not keyword:
-        return None, "분석할 키워드를 입력해주세요.", None
+def get_keyword_trend(keywords):
+    """최대 2개의 키워드에 대한 Google Trends 데이터를 가져옵니다."""
+    if not keywords or not keywords[0]:
+        return None, "분석할 기준 키워드를 입력해주세요.", None
     try:
         pytrends = TrendReq(hl='ko-KR', tz=540)
-        pytrends.build_payload(kw_list=[keyword], timeframe='today 12-m')
+        pytrends.build_payload(kw_list=keywords, timeframe='today 12-m')
         df = pytrends.interest_over_time()
 
-        if df.empty or keyword not in df.columns or df[keyword].sum() == 0:
-            return None, f"'{keyword}'에 대한 트렌드 데이터를 찾을 수 없습니다.", None
+        if df.empty or keywords[0] not in df.columns or df[keywords[0]].sum() == 0:
+            return None, f"'{keywords[0]}'에 대한 트렌드 데이터를 찾을 수 없습니다.", None
 
-        # --- 트렌드 점수 계산 ---
-        latest_90_days = df[keyword].iloc[-90:]
-        previous_90_days = df[keyword].iloc[-180:-90]
+        # --- 주 키워드에 대한 트렌드 점수 계산 ---
+        main_keyword = keywords[0]
+        latest_90_days = df[main_keyword].iloc[-90:]
+        previous_90_days = df[main_keyword].iloc[-180:-90]
 
-        peak_interest = df[keyword].max()
-        peak_date = df[keyword].idxmax().strftime('%Y년 %m월 %d일')
+        peak_interest = df[main_keyword].max()
+        peak_date = df[main_keyword].idxmax().strftime('%Y년 %m월 %d일')
         recent_avg = latest_90_days.mean()
         previous_avg = previous_90_days.mean() if not previous_90_days.empty else 0
 
@@ -48,6 +49,7 @@ def get_keyword_trend(keyword):
         total_score = (recent_performance_score * 0.6) + (momentum_score * 0.4)
 
         analysis_result = {
+            "keyword": main_keyword,
             "total_score": total_score,
             "peak_interest": peak_interest,
             "peak_date": peak_date,
@@ -55,13 +57,17 @@ def get_keyword_trend(keyword):
             "growth_ratio": growth_ratio
         }
 
-        return df[[keyword]], None, analysis_result
+        # isPartial 컬럼 제거
+        if 'isPartial' in df.columns:
+            df = df.drop(columns=['isPartial'])
+
+        return df, None, analysis_result
 
     except Exception as e:
         return None, f"Google 트렌드 데이터를 가져오는 중 오류가 발생했습니다: {e}", None
 
 # ----------------------------------------------------------------------
-# 데이터 처리 및 분석 함수
+# 기존 데이터 처리 및 분석 함수들
 # ----------------------------------------------------------------------
 
 
@@ -394,20 +400,26 @@ elif st.session_state.analysis_done:
             st.plotly_chart(fig_day, use_container_width=True)
 
     with tab4:
-        st.header("🔍 키워드 트렌드 분석 (Google Trends)")
-        st.info("궁금한 키워드를 직접 입력하여, 최근 1년간 시장의 관심도 변화를 확인하고 관련 도서를 찾아보세요.")
+        st.header("🔍 키워드 트렌드 비교 분석 (Google Trends)")
+        st.info("기준 키워드와 비교 키워드를 함께 분석하여, 시장에서의 상대적인 관심도 규모를 파악해보세요.")
 
-        keyword_input = st.text_input(
-            "분석할 키워드를 입력하세요 (예: 인공지능, 에세이, 주식 투자):", "에세이")
+        col1, col2 = st.columns(2)
+        with col1:
+            keyword_input = st.text_input("기준 키워드 (필수):", "부크크")
+        with col2:
+            keyword_compare = st.text_input("비교 키워드 (선택):", "교보문고")
 
-        if keyword_input:
+        keywords_to_analyze = [kw for kw in [
+            keyword_input, keyword_compare] if kw]
+
+        if keywords_to_analyze:
             trend_df, error_message, analysis_result = get_keyword_trend(
-                keyword_input)
+                keywords_to_analyze)
 
             if error_message:
                 st.error(error_message)
             elif trend_df is not None and analysis_result is not None:
-                st.subheader(f"'{keyword_input}' 키워드 분석 요약")
+                st.subheader(f"'{analysis_result['keyword']}' 키워드 분석 요약")
                 col1, col2, col3 = st.columns(3)
                 col1.metric(label="📈 시장 트렌드 점수",
                             value=f"{analysis_result['total_score']:.1f} 점")
@@ -423,9 +435,10 @@ elif st.session_state.analysis_done:
                     2.  **성장 모멘텀 (40% 가중치)**: 최근 3개월의 평균 관심도가 그 이전 3개월에 비해 얼마나 성장했는지를 측정합니다. (현재 시장의 성장성)
                     """)
 
-                st.subheader(f"'{keyword_input}' 키워드 관심도 변화 (지난 1년)")
-                fig_trend = px.line(trend_df, y=keyword_input,
-                                    title=f"'{keyword_input}' 검색 관심도 추이")
+                st.subheader(
+                    f"'{', '.join(keywords_to_analyze)}' 관심도 변화 비교 (지난 1년)")
+                fig_trend = px.line(
+                    trend_df, title=f"'{', '.join(keywords_to_analyze)}' 검색 관심도 추이")
                 st.plotly_chart(fig_trend, use_container_width=True)
 
                 st.subheader(f"'{keyword_input}' 관련 도서 목록")
