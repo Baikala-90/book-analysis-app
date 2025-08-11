@@ -8,20 +8,25 @@ import io
 from pytrends.request import TrendReq
 
 # ----------------------------------------------------------------------
-# 신규 기능: 시장 트렌드 분석 함수 (안정성 강화)
+# 신규 기능: 키워드 트렌드 분석 함수
 # ----------------------------------------------------------------------
 
 
 @st.cache_data(ttl=3600)  # 1시간 동안 캐시 유지
-def get_daily_trends():
-    """Google Trends에서 대한민국의 일별 인기 검색어를 가져옵니다."""
+def get_keyword_trend(keyword):
+    """특정 키워드에 대한 Google Trends 데이터를 가져옵니다."""
+    if not keyword:
+        return None, "분석할 키워드를 입력해주세요."
     try:
         pytrends = TrendReq(hl='ko-KR', tz=540)
-        trending_searches_df = pytrends.trending_searches(pn='south_korea')
-        return trending_searches_df[0].tolist()
+        pytrends.build_payload(
+            kw_list=[keyword], timeframe='today 12-m')  # 최근 1년간 데이터
+        df = pytrends.interest_over_time()
+        if df.empty or keyword not in df.columns:
+            return None, f"'{keyword}'에 대한 트렌드 데이터를 찾을 수 없습니다."
+        return df[[keyword]], None
     except Exception as e:
-        # 오류 발생 시, 오류 메시지를 문자열로 반환하여 UI에 표시하도록 함
-        return f"오류: {str(e)}"
+        return None, f"Google 트렌드 데이터를 가져오는 중 오류가 발생했습니다: {e}"
 
 # ----------------------------------------------------------------------
 # 기존 데이터 처리 및 분석 함수들
@@ -178,10 +183,10 @@ with st.sidebar:
 
         st.header("⚙️ 2. 분석 민감도 설정")
         st.info(f"데이터 기간: **{period_text}**")
-        k_param = st.slider("최신성 민감도 (k)", 0.1, 10.0, k_default, 0.1,
-                            help="값이 클수록 '최근'에 발주된 도서에 더 높은 가중치를 부여합니다. 단기 데이터를 분석할 때 높게 설정하는 것이 좋습니다.")
-        lambda_param = st.slider("장기 비활성 패널티 (λ)", 0.1, 10.0, lambda_default, 0.1,
-                                 help="값이 클수록 발주된 지 '아주 오래된' 도서에 대한 패널티를 강하게 부여합니다. 장기 데이터를 분석할 때 유용합니다.")
+        k_param = st.slider("최신성 민감도 (k)", 0.1, 10.0, k_default,
+                            0.1, help="값이 클수록 '최근'에 발주된 도서에 더 높은 가중치를 부여합니다.")
+        lambda_param = st.slider("장기 비활성 패널티 (λ)", 0.1, 10.0, lambda_default,
+                                 0.1, help="값이 클수록 발주된 지 '아주 오래된' 도서에 대한 패널티를 강하게 부여합니다.")
 
         st.header("⚙️ 3. 등급/점수 중요도 설정")
         w_amount = st.slider("총발주량 중요도", 1, 5, 4,
@@ -337,45 +342,39 @@ elif st.session_state.analysis_done:
             st.plotly_chart(fig_day, use_container_width=True)
 
     with tab4:
-        st.header("🔍 시장 트렌드 분석 (Google Trends)")
-        st.info("현재 대한민국에서 인기 있는 검색어와 관련된 도서를 찾아 수요를 예측해 보세요.")
+        st.header("🔍 키워드 트렌드 분석 (Google Trends)")
+        st.info("궁금한 키워드를 직접 입력하여, 최근 1년간 시장의 관심도 변화를 확인하고 관련 도서를 찾아보세요.")
 
-        # --- 오류 처리 강화 ---
-        result = get_daily_trends()
+        # --- 키워드 직접 입력 방식으로 변경 ---
+        keyword_input = st.text_input(
+            "분석할 키워드를 입력하세요 (예: 인공지능, 에세이, 주식 투자):", "에세이")
 
-        if isinstance(result, str):  # 함수가 오류 메시지 문자열을 반환한 경우
-            st.error(f"Google 트렌드 데이터를 가져오는 중 문제가 발생했습니다.\n\n상세 정보: {result}")
-        elif not result:  # 비어 있는 리스트가 반환된 경우
-            st.warning("현재 인기 검색어 정보를 가져올 수 없습니다.")
-        else:  # 정상적으로 키워드 리스트를 받아온 경우
-            trending_keywords = result
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.subheader("오늘의 인기 검색어")
-                st.dataframe(trending_keywords, hide_index=True,
-                             use_container_width=True, column_config={"0": "키워드"})
+        if keyword_input:
+            trend_df, error_message = get_keyword_trend(keyword_input)
 
-            with col2:
-                st.subheader("관련 도서 목록")
-                selected_keyword = st.selectbox(
-                    "분석할 인기 검색어를 선택하세요:", trending_keywords)
+            if error_message:
+                st.error(error_message)
+            elif trend_df is not None:
+                st.subheader(f"'{keyword_input}' 키워드 관심도 변화 (지난 1년)")
+                fig_trend = px.line(trend_df, y=keyword_input,
+                                    title=f"'{keyword_input}' 검색 관심도 추이")
+                st.plotly_chart(fig_trend, use_container_width=True)
 
-                if selected_keyword:
-                    book_col_name = next(
-                        (col for col in agg_df.columns if '도서명' in col), '도서명')
-                    matched_books = agg_df[agg_df[book_col_name].str.contains(
-                        selected_keyword, case=False, na=False)]
+                st.subheader(f"'{keyword_input}' 관련 도서 목록")
+                book_col_name = next(
+                    (col for col in agg_df.columns if '도서명' in col), '도서명')
+                matched_books = agg_df[agg_df[book_col_name].str.contains(
+                    keyword_input, case=False, na=False)]
 
-                    if matched_books.empty:
-                        st.write(
-                            f"**'{selected_keyword}'** 키워드가 포함된 도서를 찾을 수 없습니다.")
-                    else:
-                        display_cols = ['도서명', '등급', '종합 점수', '총발주량', '최근발주일']
-                        st.dataframe(
-                            matched_books[display_cols].sort_values(
-                                by="종합 점수", ascending=False).style.format({'종합 점수': "{:.2f}"}),
-                            use_container_width=True
-                        )
+                if matched_books.empty:
+                    st.write("관련 도서를 찾을 수 없습니다.")
+                else:
+                    display_cols = ['도서명', '등급', '종합 점수', '총발주량', '최근발주일']
+                    st.dataframe(
+                        matched_books[display_cols].sort_values(
+                            by="종합 점수", ascending=False).style.format({'종합 점수': "{:.2f}"}),
+                        use_container_width=True
+                    )
 
     with tab5:
         st.header("전체 분석 데이터")
