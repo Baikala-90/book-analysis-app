@@ -5,6 +5,27 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import KMeans
 import plotly.express as px
 import io
+from pytrends.request import TrendReq
+
+# ----------------------------------------------------------------------
+# 시장 트렌드 분석 함수
+# ----------------------------------------------------------------------
+
+
+@st.cache_data(ttl=3600)
+def get_keyword_trend(keyword):
+    """특정 키워드에 대한 Google Trends 데이터를 가져옵니다."""
+    if not keyword:
+        return None, "분석할 키워드를 입력해주세요."
+    try:
+        pytrends = TrendReq(hl='ko-KR', tz=540)
+        pytrends.build_payload(kw_list=[keyword], timeframe='today 12-m')
+        df = pytrends.interest_over_time()
+        if df.empty or keyword not in df.columns:
+            return None, f"'{keyword}'에 대한 트렌드 데이터를 찾을 수 없습니다."
+        return df[[keyword]], None
+    except Exception as e:
+        return None, f"Google 트렌드 데이터를 가져오는 중 오류가 발생했습니다: {e}"
 
 # ----------------------------------------------------------------------
 # 데이터 처리 및 분석 함수
@@ -13,9 +34,7 @@ import io
 
 @st.cache_data
 def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_freq, w_recency):
-    """
-    파일 내용을 입력받아 데이터 처리 및 분석을 수행합니다.
-    """
+    """파일 내용을 입력받아 데이터 처리 및 분석을 수행합니다."""
     try:
         file_name = st.session_state.get('file_name', '')
         file_extension = file_name.split('.')[-1]
@@ -94,7 +113,6 @@ def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_f
                  cluster_id in enumerate(sorted_clusters)}
     agg_df['등급'] = agg_df['Cluster'].map(grade_map)
 
-    # --- 종합 점수 및 기여도 계산 ---
     total_weight = w_amount + w_freq + w_recency
     agg_df['발주량 기여도'] = ((w_amount * agg_df['총발주량_정규화']) / total_weight) * 100
     agg_df['발주횟수 기여도'] = ((w_freq * agg_df['발주횟수_정규화']) / total_weight) * 100
@@ -200,8 +218,9 @@ elif st.session_state.analysis_done:
 
     st.success(f"✅ **{st.session_state.file_name}** 파일 분석이 완료되었습니다.")
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["[ 📈 등급 요약 ]", "[ 🌟 유망 도서 발굴 ]", "[ 📊 데이터 인사이트 ]", "[ 📋 전체 데이터 ]"])
+    # --- 탭 복구 ---
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["[ 📈 등급 요약 ]", "[ 🌟 유망 도서 발굴 ]", "[ 📊 데이터 인사이트 ]", "[ 🔍 시장 트렌드 분석 ]", "[ 📋 전체 데이터 ]"])
 
     with tab1:
         st.header("등급별 요약")
@@ -227,18 +246,13 @@ elif st.session_state.analysis_done:
             | **5등급** | **비활성/관리 그룹** | **재고 처분 및 단종** 검토 |
             """)
 
-        # --- 종합 점수 설명 추가 ---
         with st.expander("💯 '종합 점수'는 어떻게 계산되나요?"):
             st.markdown(f"""
             '종합 점수'는 각 도서의 **시장 경쟁력을 0점에서 100점 사이의 점수로 환산**하여, 같은 등급 내에서도 세밀한 비교가 가능하도록 만든 지표입니다. 계산 과정은 다음과 같습니다.
-
             1.  **지표별 점수화**: '총발주량', '발주횟수', '시간가중치'를 각각 0~1점 사이의 점수로 변환합니다.
             2.  **가중치 적용**: 사이드바에서 설정한 **중요도(현재: 발주량 {w_amount}, 발주횟수 {w_freq}, 최신성 {w_recency})**를 각 점수에 곱해줍니다.
             3.  **100점 만점 환산**: 가중치가 적용된 점수들을 합산하여 100점 만점의 최종 점수를 계산합니다.
-
             > **`종합 점수`** = (`발주량 점수` × `발주량 중요도` + `발주횟수 점수` × `발주횟수 중요도` + `최신성 점수` × `최신성 중요도`) 를 100점 만점으로 스케일링
-            
-            따라서 이 점수는 마케터가 설정한 **전략적 중요도를 직접적으로 반영**하는 신뢰도 높은 지표입니다.
             """)
 
     with tab2:
@@ -288,7 +302,6 @@ elif st.session_state.analysis_done:
         for _, row in promising_books_df.iterrows():
             book_title = row[book_col_name]
             with st.expander(f"'{book_title}' (종합점수: {row['종합 점수']:.2f}점)"):
-                # --- 점수 기여도 표시 ---
                 st.markdown("##### 종합 점수 상세 분석")
                 score_details_df = pd.DataFrame({
                     "지표": ["발주량 기여도", "발주횟수 기여도", "최신성 기여도"],
@@ -349,6 +362,40 @@ elif st.session_state.analysis_done:
             st.plotly_chart(fig_day, use_container_width=True)
 
     with tab4:
+        st.header("🔍 키워드 트렌드 분석 (Google Trends)")
+        st.info("궁금한 키워드를 직접 입력하여, 최근 1년간 시장의 관심도 변화를 확인하고 관련 도서를 찾아보세요.")
+
+        keyword_input = st.text_input(
+            "분석할 키워드를 입력하세요 (예: 인공지능, 에세이, 주식 투자):", "에세이")
+
+        if keyword_input:
+            trend_df, error_message = get_keyword_trend(keyword_input)
+
+            if error_message:
+                st.error(error_message)
+            elif trend_df is not None:
+                st.subheader(f"'{keyword_input}' 키워드 관심도 변화 (지난 1년)")
+                fig_trend = px.line(trend_df, y=keyword_input,
+                                    title=f"'{keyword_input}' 검색 관심도 추이")
+                st.plotly_chart(fig_trend, use_container_width=True)
+
+                st.subheader(f"'{keyword_input}' 관련 도서 목록")
+                book_col_name = next(
+                    (col for col in agg_df.columns if '도서명' in col), '도서명')
+                matched_books = agg_df[agg_df[book_col_name].str.contains(
+                    keyword_input, case=False, na=False)]
+
+                if matched_books.empty:
+                    st.write("관련 도서를 찾을 수 없습니다.")
+                else:
+                    display_cols = ['도서명', '등급', '종합 점수', '총발주량', '최근발주일']
+                    st.dataframe(
+                        matched_books[display_cols].sort_values(
+                            by="종합 점수", ascending=False).style.format({'종합 점수': "{:.2f}"}),
+                        use_container_width=True
+                    )
+
+    with tab5:
         st.header("전체 분석 데이터")
         display_columns = ['도서명', '등급', '종합 점수', '발주량 기여도',
                            '발주횟수 기여도', '최신성 기여도', '총발주량', '발주횟수', '평균 발주 간격']
