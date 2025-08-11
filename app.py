@@ -17,7 +17,6 @@ def load_and_process_data(uploaded_file_contents, k, lambda_param, w_amount, w_f
     파일 내용을 입력받아 데이터 처리 및 분석을 수행합니다.
     """
     try:
-        # st.session_state에서 파일 이름 가져오기
         file_name = st.session_state.get('file_name', '')
         file_extension = file_name.split('.')[-1]
 
@@ -210,15 +209,16 @@ elif st.session_state.analysis_done:
             st.plotly_chart(fig_bar, use_container_width=True)
 
         with col2:
-            st.subheader("② 등급별 의미와 전략")
+            st.subheader("② 부크크 맞춤형 등급 전략")
+            # --- 수정된 등급별 의미와 전략 ---
             st.markdown("""
-            | 등급 | 의미 및 상태 | 추천 전략 |
-            | :---: | :--- | :--- |
-            | **1등급** | **최상위 핵심 그룹** | **재고 최우선 확보**, 적극적인 마케팅 |
-            | **2등급** | 꾸준한 **우수 그룹** | **안정적인 재고 수준 유지**, 크로스셀링 |
-            | **3등급** | **성장/하락 가능성** 보유 그룹 | 수요 예측, 판매 촉진 전략 고민 |
-            | **4등급** | 발주가 뜸한 **주의 그룹** | **재고 최소화**, 원인 분석 |
-            | **5등급** | **비활성/관리 그룹** | **재고 처분 및 단종** 검토 |
+            | 등급 | 핵심 의미 | 마케팅 액션 아이템 | 옵셋 전환 검토 |
+            | :---: | :--- | :--- | :--- |
+            | **1등급** | **시장 검증 완료** | 판매 가속화를 위한 **광고/프로모션 집행**. 베스트셀러 작가 연계 마케팅. | **옵셋 전환 최우선 검토 대상.** 손익분기점(BEP) 분석 후 즉시 추진. |
+            | **2등급** | **꾸준한 스테디셀러** | **리뷰 이벤트, 카드뉴스** 등 지속적인 콘텐츠로 관심 유지. 작가 브랜딩 강화. | **잠재적 옵셋 전환 대상.** 월별 판매량 추이 모니터링 후, 상승 시 전환 검토. |
+            | **3등급** | **성장/하락 갈림길** | 판매 데이터 기반 **타겟 고객 재설정**. SNS 채널을 통한 저비용 바이럴 유도. | 아직 POD 유지. **'유망 도서 발굴'** 탭에서 판매 추이 집중 관찰. |
+            | **4등급** | **관심 하락** | 재고 부담 없으므로 **가격 할인 이벤트**를 통한 판매량 재확인. | 옵셋 전환 가능성 매우 낮음. POD 생산 유지. |
+            | **5등급** | **시장에서 잊혀짐** | 프로모션에서 제외. 다른 도서와의 **묶음 판매**로 소진 시도. | 데이터상 **절판**을 고려해야 하는 단계. |
             """)
 
     with tab2:
@@ -272,7 +272,7 @@ elif st.session_state.analysis_done:
                 daily_history = history_df.groupby(next(col for col in history_df.columns if '날짜' in col)).agg(
                     일일_발주량=(
                         next(col for col in history_df.columns if '발주량' in col), 'sum'),
-                    날짜_라벨=('날짜_라벨', 'first')  # 그룹화된 첫번째 라벨 사용
+                    날짜_라벨=('날짜_라벨', 'first')
                 ).reset_index()
 
                 fig = px.line(daily_history, x='날짜_라벨', y='일일_발주량', title=f"'{book_title}' 발주량 추이", markers=True, labels={
