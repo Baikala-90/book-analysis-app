@@ -8,7 +8,7 @@ import io
 from pytrends.request import TrendReq
 
 # ----------------------------------------------------------------------
-# 시장 트렌드 분석 함수 (비교 기능 추가)
+# 시장 트렌드 분석 함수
 # ----------------------------------------------------------------------
 
 
@@ -25,7 +25,6 @@ def get_keyword_trend(keywords):
         if df.empty or keywords[0] not in df.columns or df[keywords[0]].sum() == 0:
             return None, f"'{keywords[0]}'에 대한 트렌드 데이터를 찾을 수 없습니다.", None
 
-        # --- 주 키워드에 대한 트렌드 점수 계산 ---
         main_keyword = keywords[0]
         latest_90_days = df[main_keyword].iloc[-90:]
         previous_90_days = df[main_keyword].iloc[-180:-90]
@@ -57,7 +56,6 @@ def get_keyword_trend(keywords):
             "growth_ratio": growth_ratio
         }
 
-        # isPartial 컬럼 제거
         if 'isPartial' in df.columns:
             df = df.drop(columns=['isPartial'])
 
@@ -67,7 +65,7 @@ def get_keyword_trend(keywords):
         return None, f"Google 트렌드 데이터를 가져오는 중 오류가 발생했습니다: {e}", None
 
 # ----------------------------------------------------------------------
-# 기존 데이터 처리 및 분석 함수들
+# 데이터 처리 및 분석 함수
 # ----------------------------------------------------------------------
 
 
@@ -181,6 +179,8 @@ st.title("📚 도서 발주 데이터 분석 대시보드")
 
 if 'analysis_done' not in st.session_state:
     st.session_state.analysis_done = False
+if 'page_number' not in st.session_state:
+    st.session_state.page_number = 0
 
 with st.sidebar:
     st.header("⚙️ 1. 분석 파일 업로드")
@@ -190,6 +190,7 @@ with st.sidebar:
     if uploaded_file:
         if 'file_name' not in st.session_state or st.session_state.file_name != uploaded_file.name:
             st.session_state.analysis_done = False
+            st.session_state.page_number = 0  # 새 파일 업로드 시 페이지 번호 초기화
             st.session_state.file_name = uploaded_file.name
             st.session_state.file_contents = uploaded_file.getvalue()
 
@@ -244,6 +245,7 @@ with st.sidebar:
                     st.session_state.analysis_done = True
                     st.session_state.agg_df = agg_df
                     st.session_state.df_raw = df_raw_or_error
+                    st.session_state.page_number = 0
                 else:
                     st.session_state.analysis_done = False
                     st.error(df_raw_or_error)
@@ -290,7 +292,6 @@ elif st.session_state.analysis_done:
             1.  **지표별 점수화**: '총발주량', '발주횟수', '시간가중치'를 각각 0~1점 사이의 점수로 변환합니다.
             2.  **가중치 적용**: 사이드바에서 설정한 **중요도(현재: 발주량 {w_amount}, 발주횟수 {w_freq}, 최신성 {w_recency})**를 각 점수에 곱해줍니다.
             3.  **100점 만점 환산**: 가중치가 적용된 점수들을 합산하여 100점 만점의 최종 점수를 계산합니다.
-            > **`종합 점수`** = (`발주량 점수` × `발주량 중요도` + `발주횟수 점수` × `발주횟수 중요도` + `최신성 점수` × `최신성 중요도`) 를 100점 만점으로 스케일링
             """)
 
     with tab2:
@@ -337,7 +338,15 @@ elif st.session_state.analysis_done:
         promising_books_df = promising_books_df.sort_values(
             by=sort_by_options[sort_by], ascending=(sort_order == "오름차순"))
 
-        for _, row in promising_books_df.iterrows():
+        ITEMS_PER_PAGE = 10
+        total_items = len(promising_books_df)
+        total_pages = max(1, (total_items - 1) // ITEMS_PER_PAGE + 1)
+
+        start_idx = st.session_state.page_number * ITEMS_PER_PAGE
+        end_idx = start_idx + ITEMS_PER_PAGE
+        paginated_df = promising_books_df.iloc[start_idx:end_idx]
+
+        for _, row in paginated_df.iterrows():
             book_title = row[book_col_name]
             with st.expander(f"'{book_title}' (종합점수: {row['종합 점수']:.2f}점)"):
                 st.markdown("##### 종합 점수 상세 분석")
@@ -359,6 +368,20 @@ elif st.session_state.analysis_done:
                 fig = px.line(daily_history, x='날짜_라벨', y='일일_발주량', title=f"'{book_title}' 발주량 추이", markers=True, labels={
                               '날짜_라벨': '날짜', '일일_발주량': '발주량'})
                 st.plotly_chart(fig, use_container_width=True)
+
+        col_page1, col_page2, col_page3 = st.columns([1, 1, 1])
+        if col_page1.button("◀ 이전", use_container_width=True, key="prev_page"):
+            if st.session_state.page_number > 0:
+                st.session_state.page_number -= 1
+                st.rerun()
+
+        col_page2.markdown(
+            f"<div style='text-align: center; margin-top: 5px;'>페이지 {st.session_state.page_number + 1} / {total_pages}</div>", unsafe_allow_html=True)
+
+        if col_page3.button("다음 ▶", use_container_width=True, key="next_page"):
+            if st.session_state.page_number < total_pages - 1:
+                st.session_state.page_number += 1
+                st.rerun()
 
     with tab3:
         st.header("데이터 인사이트 시각화")
